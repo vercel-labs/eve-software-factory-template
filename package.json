@@ -1,8 +1,8 @@
 {
   "name": "eve-software-factory-template",
-  "description": "Foreman, the eve Software Factory.",
   "version": "0.0.0",
   "private": true,
+  "description": "Foreman, the eve Software Factory.",
   "license": "MIT",
   "type": "module",
   "imports": {
@@ -24,7 +24,7 @@
     "@vercel/blob": "^2.8.0",
     "@vercel/connect": "0.8.0",
     "ai": "^7.0.63",
-    "eve": "^0.33.3",
+    "eve": "^0.34.0",
     "zod": "4.4.3"
   },
   "devDependencies": {

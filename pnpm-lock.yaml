@@ -10,19 +10,19 @@ importers:
     dependencies:
       '@github-tools/eve-extension':
         specifier: ^0.3.2
-        version: 0.3.2(@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)))(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))
+        version: 0.3.2(@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)))(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))
       '@vercel/blob':
         specifier: ^2.8.0
         version: 2.8.0
       '@vercel/connect':
         specifier: 0.8.0
-        version: 0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))
+        version: 0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))
       ai:
         specifier: ^7.0.63
         version: 7.0.63(zod@4.4.3)
       eve:
-        specifier: ^0.33.3
-        version: 0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)
+        specifier: ^0.34.0
+        version: 0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -643,8 +643,8 @@ packages:
       wrangler:
         optional: true
 
-  eve@0.33.3:
-    resolution: {integrity: sha512-R20GiIgnLjJJ38D0FJwEbaBqdYni7j2YNfp6bOUnjgawnlhD6qP/wv9AR+3RMKHw7oylShEp9cvLT0eGpRwSZQ==}
+  eve@0.34.0:
+    resolution: {integrity: sha512-zgrYIbm8u78Furxfdyzaknf5AxFCzwmTGfLEvgax00BUNXu3eebaos8igjYQyM4q5JAxlWAoZCJuItE6r2S0cw==}
     engines: {node: '>=24'}
     hasBin: true
     peerDependencies:
@@ -1090,27 +1090,27 @@ snapshots:
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
 
-  '@github-tools/eve-extension@0.3.2(@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)))(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))':
+  '@github-tools/eve-extension@0.3.2(@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)))(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))':
     dependencies:
-      '@github-tools/sdk': 1.11.1(@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)))(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))(zod@4.4.3)
-      eve: 0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)
+      '@github-tools/sdk': 1.11.1(@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)))(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))(zod@4.4.3)
+      eve: 0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)
       zod: 4.4.3
     optionalDependencies:
-      '@vercel/connect': 0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))
+      '@vercel/connect': 0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))
     transitivePeerDependencies:
       - '@ai-sdk/workflow'
       - '@workflow/ai'
       - ai
       - workflow
 
-  '@github-tools/sdk@1.11.1(@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)))(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))(zod@4.4.3)':
+  '@github-tools/sdk@1.11.1(@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)))(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))(zod@4.4.3)':
     dependencies:
       ai: 7.0.63(zod@4.4.3)
       octokit: 5.0.5
       zod: 4.4.3
     optionalDependencies:
-      '@vercel/connect': 0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))
-      eve: 0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)
+      '@vercel/connect': 0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))
+      eve: 0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)
 
   '@octokit/app@16.1.4':
     dependencies:
@@ -1403,12 +1403,12 @@ snapshots:
     dependencies:
       execa: 5.1.1
 
-  '@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))':
+  '@vercel/connect@0.8.0(ai@7.0.63(zod@4.4.3))(eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2))':
     dependencies:
       '@vercel/oidc': 3.8.4
     optionalDependencies:
       ai: 7.0.63(zod@4.4.3)
-      eve: 0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)
+      eve: 0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2)
 
   '@vercel/oidc@3.2.0': {}
 
@@ -1475,7 +1475,7 @@ snapshots:
       httpxy: 0.5.5
       srvx: 0.11.22
 
-  eve@0.33.3(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2):
+  eve@0.34.0(@vercel/blob@2.8.0)(ai@7.0.63(zod@4.4.3))(chokidar@4.0.3)(lru-cache@11.5.2):
     dependencies:
       ai: 7.0.63(zod@4.4.3)
       nitro: 3.0.260610-beta(@vercel/blob@2.8.0)(chokidar@4.0.3)(lru-cache@11.5.2)
