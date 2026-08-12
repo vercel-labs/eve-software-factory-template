@@ -24,6 +24,7 @@ Each station is a declared subagent with its own instructions, sandbox, and tool
 - **Label an issue `factory`.** The pipeline runs unattended, posts progress comments as stations complete, and links a draft PR from the issue. When clarification is needed, it posts its questions and stops.
 - **@Foreman on an issue or PR.** Mentions from repo owners, members, and collaborators start an attended session. Anyone else is ignored.
 - **Delegate in Linear.** Linear Agent Sessions run the same pipeline and report back as Agent Activities.
+- **@Foreman in Slack.** Mention or DM Foreman in a workspace where the Slack app is installed; it runs the pipeline and replies in the thread. Every workspace member is trusted (optional channel, off until you attach a Slack connector).
 - **The dev TUI.** Hand it a work item locally. Writes park on approval cards there, which doubles as a demo of the human gate.
 - **Red CI on a factory PR.** When a check suite fails on a pull request the factory pushed, it diagnoses the failure and pushes a fix to the same branch; after 2 unsuccessful attempts it pauses and asks for a person. PRs people pushed are never touched.
 
@@ -80,10 +81,19 @@ vercel connect attach <github-uid> --triggers --trigger-path /eve/v1/github --ye
 vercel connect create linear --triggers
 vercel connect attach <linear-uid> --triggers --trigger-path /eve/v1/linear --yes
 
+# Optional Slack connector (UID -> SLACK_CONNECTOR); enable Event Subscriptions
+# for app_mention and message.im during registration. The create step lands on
+# the default Connect path, so detach and re-attach at the eve Slack route
+vercel connect create slack --triggers
+vercel connect detach <slack-uid> --yes
+vercel connect attach <slack-uid> --triggers --trigger-path /eve/v1/slack --yes
+
 # Environment: the connector UIDs printed above, plus the target repository (owner/repo)
 vercel env add GITHUB_CONNECTOR
 vercel env add LINEAR_CONNECTOR
 vercel env add FACTORY_REPO
+# Optional, only if you set up the Slack connector above
+# vercel env add SLACK_CONNECTOR
 
 # Blob store for user preferences and the factory brain
 vercel blob create-store factory-store --access public --yes
@@ -134,7 +144,7 @@ See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full component map and trust 
 
 - **Continuous operation:** Add a schedule that sweeps for queued work on a cron; the approval policies already recognize schedule turns (`isScheduleAppAuth` in `agent/lib/trust.ts`).
 - **Merge behind approval:** Add `mergePullRequest` to the extension's allowlist mapped to `shipPolicy` if you want "@Foreman merge it" to work from a comment.
-- **More intake:** The GitHub channel also has `onCheckRun`/`onWorkflowRun` hooks, and eve ships Slack, Teams, and other channels.
+- **More intake:** The GitHub channel also has `onCheckRun`/`onWorkflowRun` hooks; the Slack channel here handles mentions and DMs, and eve also ships Discord, Teams, and other channels.
 - **Deeper station tooling:** Stations are ordinary eve agents; give the analyst a Sentry MCP connection, or the reviewer a browser extension. Stations inherit nothing, so capabilities go in the station's own directory.
 
 ## Learn more

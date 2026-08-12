@@ -24,6 +24,7 @@ agent/
   channels/
     github.ts               # eve GitHub channel via Vercel Connect; botName "Foreman"; four hooks: onComment (mention, association-gated, stamps trusted), onIssue ('factory' label -> unattended pipeline under the autonomous principal), onCheckSuite (red CI on factory/* PRs -> unattended fix loop, capped at 2 attempts), onPullRequest (summary comment on opened PRs, bots skipped)
     linear.ts               # eve Linear channel via Connect; Agent Sessions; stamps trusted (workspace membership is the gate), injects requester name
+    slack.ts                # optional eve Slack channel via Connect (SLACK_CONNECTOR); onAppMention + onDirectMessage, stamps workspace members trusted, drops bots; inert until a connector is attached
     eve.ts                  # inbound route auth; dev-only localDevUser shim (user principal)
   connections/
     linear.ts               # Linear MCP server (mcp.linear.app); app-scoped auth via linearAuth; writes denied on unattended runs
@@ -67,6 +68,7 @@ evals/                      # eve eval runner suite: smoke, routing/, safety/, p
 | Orchestrator | `agent/agent.ts` + `instructions.ts` | Agent | Routes work items through the stations in order, verifies handoffs, runs the review loop (max 2 cycles), opens the draft PR, reports back; never writes code itself |
 | GitHub surface | `agent/channels/github.ts` | Channel | Intake and delivery: association-gated @Foreman mentions (stamped trusted), `factory`-label intake (rewritten to the autonomous principal, unattended framing injected), PR summary comments on opened PRs; replies render in-thread |
 | Linear surface | `agent/channels/linear.ts` | Channel | Linear Agent Sessions: users delegate issues to the factory; every session is stamped trusted (workspace membership); elicitations render natively |
+| Slack surface | `agent/channels/slack.ts` | Channel | Optional (`SLACK_CONNECTOR`): `@Foreman` mentions and DMs run the pipeline and reply in-thread; workspace members stamped trusted (like Linear), other bots dropped; inert until a connector is attached |
 | Route auth | `agent/channels/eve.ts` | Channel | Inbound auth for the eve route; the `localDevUser` shim upgrades the dev principal to a user so user-scoped features work in the dev TUI |
 | GitHub tools | `agent/extensions/github.ts` | Extension | The orchestrator's GitHub surface as `github__*` tools: reads, triage writes, PR authoring; an explicit allowlist (no preset, no merge tools) with approval predicates doubling as the authorization policy |
 | Trust authority | `agent/lib/trust.ts` | Library | The only place caller trust is defined: trusted (stamped at dispatch), autonomous (label intake), schedule app auth; new capabilities gate on these predicates rather than inventing their own checks |
@@ -107,6 +109,7 @@ There is no application database. Anything that must outlive a session (for exam
 | --- | --- | --- |
 | GitHub | Label intake, mentions, and PR events in; comments, branches, and draft PRs out | eve GitHub channel + `@github-tools/eve-extension`, both via Vercel Connect (`GITHUB_CONNECTOR`); station git via firewall-brokered installation tokens |
 | Linear (channel + MCP) | Agent Sessions in; issue creation, comments, cross-references out | eve Linear channel via Connect; MCP connection to `mcp.linear.app` with app-scoped auth shared through `linearAuth` (`LINEAR_CONNECTOR`) |
+| Slack (optional) | `@Foreman` mentions and DMs in; threaded replies out | eve Slack channel via Connect (`SLACK_CONNECTOR`); bot token and webhook verification brokered by Connect, no static secrets |
 | Vercel Blob | Per-user preference storage and the shared factory brain | `@vercel/blob`, OIDC-authenticated |
 | Vercel AI Gateway | Model access for the root and every station | Gateway model ids; the root model in `agent/agent.ts`, per-station models in each station's `agent.ts` (the reviewer deliberately runs a different vendor) |
 | Vercel Sandbox | Isolated runtimes: root checkout + three station clones | `agent/sandbox.ts` and `agent/subagents/*/sandbox.ts` (`vercel()` backend, shared builders in `agent/lib/github/repo-sandbox.ts`) |
@@ -146,7 +149,7 @@ There is no application database. Anything that must outlive a session (for exam
 
 - **Continuous operation:** a sweep schedule (handler mode, one dispatched session per queued item) needs cross-run dedupe state, which needs an external store; the approval policies already recognize schedule turns via `isScheduleAppAuth`.
 - **Merge behind approval:** add `mergePullRequest` to the extension's allowlist mapped to `shipPolicy` for comment-driven merges.
-- **More intake:** `onCheckRun`/`onWorkflowRun` (finer-grained CI intake), Sentry via an MCP connection on the analyst, Slack via eve's Slack channel.
+- **More intake:** `onCheckRun`/`onWorkflowRun` (finer-grained CI intake), Sentry via an MCP connection on the analyst, and Discord, Teams, or Telegram via eve's other channels (the Slack channel is already mounted).
 - **Per-caller tool surfaces:** today the caller class changes approval outcomes, not which tools are mounted; extension-level dynamic tool surfaces would trim schema tokens for untrusted sessions.
 - **Parallel tracks:** for large items, the analyst could split independent tracks and the orchestrator could fan out several implementer calls in one response (eve runs the batch concurrently), with non-overlapping write scopes.
 
