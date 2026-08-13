@@ -1,6 +1,7 @@
 import {
   defaultGitHubAuth,
   type GitHubComment,
+  type GitHubInboundContext,
   githubChannel,
 } from "eve/channels/github";
 import { FACTORY_BRANCH_PREFIX, FACTORY_LABEL } from "../lib/constants.js";
@@ -57,6 +58,48 @@ const isTrustedCommenter = (comment: GitHubComment): boolean => {
   return (
     typeof association === "string" && TRUSTED_ASSOCIATIONS.has(association)
   );
+};
+
+/**
+ * Repository roles allowed to hand an issue to the factory by labeling it.
+ *
+ * @remarks
+ * GitHub's fine-grained role names from the collaborator-permission endpoint.
+ * Triage is the floor: it is the permission normally required to apply a
+ * label by hand.
+ */
+const TRUSTED_LABELER_ROLES = new Set(["admin", "maintain", "write", "triage"]);
+
+/**
+ * Whether the webhook sender holds at least triage permission on the repo.
+ *
+ * @remarks
+ * The issues webhook carries the issue author's association, never the
+ * labeler's, and GitHub fires the `labeled` action even for labels attached
+ * at creation time, which issue templates let unauthenticated reporters do.
+ * Verifying the sender's permission against the API is what keeps the
+ * unattended pipeline maintainer-triggered. Fails closed: an API error
+ * acknowledges the event without dispatching.
+ */
+const isTrustedLabeler = async (
+  ctx: GitHubInboundContext
+): Promise<boolean> => {
+  try {
+    const response = await ctx.github.request<{
+      permission?: string;
+      role_name?: string;
+    }>({
+      method: "GET",
+      path: `/repos/${ctx.repository.owner}/${ctx.repository.name}/collaborators/${encodeURIComponent(ctx.sender.login)}/permission`,
+    });
+    if (!response.ok) {
+      return false;
+    }
+    const role = response.body.role_name ?? response.body.permission;
+    return typeof role === "string" && TRUSTED_LABELER_ROLES.has(role);
+  } catch {
+    return false;
+  }
 };
 
 /**
@@ -129,17 +172,18 @@ const PR_SUMMARY_TASK = [
  *   acknowledged without a session, so arbitrary accounts on a public repo
  *   cannot drive the agent's write tools.
  * - `onIssue` is the unattended intake: adding the factory label hands the
- *   issue to the pipeline. Only the `labeled` action dispatches, never a
- *   label carried on `opened`, because issue templates let unauthenticated
- *   reporters attach labels at open time. The factory label is matched
- *   against the issue's current `labels` array rather than a single "added
- *   label" field, because eve exposes the issue object as `issue.raw`, not
- *   the raw webhook payload that carries the just-added label. Applying a
- *   label requires triage permission, so the trigger is maintainer-initiated,
- *   but the turn itself runs unattended: the auth is rewritten to the
- *   constructed autonomous principal with the intake issue number stamped in,
- *   and the approval policies deny it everything except labels, progress
- *   comments on that one issue, and draft pull requests.
+ *   issue to the pipeline. Only the `labeled` action dispatches, and the
+ *   labeler's repository permission is verified against the API first,
+ *   because GitHub fires `labeled` even for labels attached at creation time
+ *   and issue templates let unauthenticated reporters do exactly that; below
+ *   triage, the event is acknowledged without a session. The factory label is
+ *   matched against the issue's current `labels` array rather than a single
+ *   "added label" field, because eve exposes the issue object as `issue.raw`,
+ *   not the raw webhook payload that carries the just-added label. The turn
+ *   itself runs unattended: the auth is rewritten to the constructed
+ *   autonomous principal with the intake issue number stamped in, and the
+ *   approval policies deny it everything except labels, progress comments on
+ *   that one issue, closing or reopening issues, and draft pull requests.
  * - `onPullRequest` dispatches only on the `opened` action and skips PRs
  *   opened by bots, which covers Dependabot and the factory's own
  *   `foreman[bot]` pull requests. It is deliberately not gated by
@@ -191,7 +235,7 @@ export default githubChannel({
     isTrustedCommenter(comment)
       ? { auth: stampTrusted(defaultGitHubAuth(ctx)) }
       : null,
-  onIssue: (ctx, issue) => {
+  onIssue: async (ctx, issue) => {
     const { labels } = issue.raw as {
       labels?: ReadonlyArray<{ name?: unknown }>;
     };
@@ -201,7 +245,8 @@ export default githubChannel({
     if (
       issue.action !== "labeled" ||
       !hasFactoryLabel ||
-      ctx.sender.type === "Bot"
+      ctx.sender.type === "Bot" ||
+      !(await isTrustedLabeler(ctx))
     ) {
       return null;
     }
