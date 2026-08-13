@@ -26,6 +26,7 @@ Each station is a declared subagent with its own instructions, sandbox, and tool
 - **Delegate in Linear.** Linear Agent Sessions run the same pipeline and report back as Agent Activities.
 - **The dev TUI.** Hand it a work item locally. Writes park on approval cards there, which doubles as a demo of the human gate.
 - **Red CI on a factory PR.** When a check suite fails on a pull request the factory pushed, it diagnoses the failure and pushes a fix to the same branch; after 2 unsuccessful attempts it pauses and asks for a person. PRs people pushed are never touched.
+- **Someone opens a pull request.** Foreman posts one orienting comment for reviewers: what the PR does and why, plus a table of the changed files. This is a summary, not a review, and it doesn't run the pipeline; PRs opened by bots are skipped.
 
 ## Factory memory
 

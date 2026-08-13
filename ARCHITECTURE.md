@@ -22,7 +22,7 @@ agent/
   agent.ts                  # model configuration (defineAgent): compaction + a session token budget sized for the whole pipeline
   instructions.ts           # defineInstructions: the orchestrator prompt, resolved at build time (injects FACTORY_REPO)
   channels/
-    github.ts               # eve GitHub channel via Vercel Connect; botName "Foreman"; four hooks: onComment (mention, association-gated, stamps trusted), onIssue ('factory' label -> unattended pipeline under the autonomous principal), onCheckSuite (red CI on factory/* PRs -> unattended fix loop, capped at 2 attempts), onPullRequest (summary comment on opened PRs, bots skipped)
+    github.ts               # eve GitHub channel via Vercel Connect; botName resolved from the connector's app slug; four hooks: onComment (mention, association-gated, stamps trusted), onIssue ('factory' label -> unattended pipeline under the autonomous principal), onCheckSuite (red CI on factory/* PRs -> unattended fix loop, capped at 2 attempts), onPullRequest (summary comment on opened PRs, bots skipped)
     linear.ts               # eve Linear channel via Connect; Agent Sessions; stamps trusted (workspace membership is the gate), injects requester name
     eve.ts                  # inbound route auth; dev-only localDevUser shim (user principal)
   connections/
