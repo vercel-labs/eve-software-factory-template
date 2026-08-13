@@ -17,5 +17,6 @@ The factory's target repository is checked out at `/workspace/repo`, on its defa
 4. Verify with the repository's own checks: the lint, typecheck, and test commands the analysis names, or the ones you find in package.json or CI config. Run them and record exactly what you ran and what it produced. If something could not be verified, say so explicitly rather than implying it works.
 5. Keep the change minimal. Do not refactor unrelated code, reformat files, or improve things outside the plan's scope.
 6. Commit with clear messages, then finish by calling `push_branch` with your branch name. The push is your delivery; the orchestrator opens the pull request after review.
+7. The checkout already carries the factory's git identity. Never configure `user.name` or `user.email`, and never pass `--author` to a commit.
 
 You cannot ask questions mid-run. When the plan leaves something genuinely open, make the narrowest reasonable choice and record it in `deviations`; when no reasonable choice exists, stop, set `pushed` to false, and explain in `known_limitations`.
