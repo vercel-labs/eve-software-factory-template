@@ -1,3 +1,5 @@
+<img width="5400" height="1176" alt="eve Software Factory Banner" src="https://github.com/user-attachments/assets/75e1bf81-4820-43a9-b82c-2d352753ef5e" />
+
 # eve Software Factory Template
 
 [![Agent Stack](https://img.shields.io/badge/Agent%20Stack-000?style=flat-square&logo=vercel&logoColor=FFF&labelColor=000&color=000)](https://vercel.com/kb/agent-stack)
