@@ -6,7 +6,7 @@ Guidance for AI coding agents working in this repository.
 
 The eve Software Factory template: Foreman, an orchestrator agent built on the [eve](https://eve.dev) framework that turns work items into reviewed draft pull requests on the configured repository (`FACTORY_REPO`). Work arrives from GitHub (an issue labeled `factory` runs unattended; @Foreman mentions from owners/members/collaborators run attended) and from Linear Agent Sessions. The orchestrator moves every item through four declared subagent stations in order: **classifier** (triage, fast model) → **analyst** (plan + acceptance criteria, own repo checkout) → **implementer** (codes, verifies, pushes a feature branch from its own checkout) → **reviewer** (independent verdict on the pushed branch, different model vendor, max 2 revision cycles). The orchestrator then opens a draft PR; marking it ready parks on human approval, closing or reopening issues runs as reversible triage, and merging is not in the tool surface. Per-user preferences live in **Vercel Blob**, alongside a shared, per-repo **factory brain** (durable notes about the target repository) under a reserved Blob prefix, readable by every run but writable only by trusted callers. The pipeline lives in `agent/instructions.ts`.
 
-The whole agent is defined under `agent/`. eve discovers capabilities from the filesystem. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the component map, data flow, trust model, and boundaries.
+The whole agent is defined under `agent/`. eve discovers capabilities from the filesystem. See [`ARCHITECTURE.md`](./.github/ARCHITECTURE.md) for the component map, data flow, trust model, and boundaries.
 
 ## Setup & commands
 
