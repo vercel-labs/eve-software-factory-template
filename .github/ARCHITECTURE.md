@@ -7,7 +7,7 @@ A map of how this agent is put together, for humans and AI agents working in the
 - **Name:** eve Software Factory (bot name Foreman)
 - **Maintainer:** Vercel Labs
 - **License:** MIT
-- **Last updated:** 2026-08-13
+- **Last updated:** 2026-08-14
 
 ## Overview
 
@@ -32,10 +32,10 @@ agent/
   sandbox.ts                # root sandbox (Vercel Sandbox); the GitHub channel checks the triggering thread's ref out here
   subagents/
     classifier/             # agent.ts (outputSchema) + instructions.md; text-only triage
-    analyst/                # agent.ts (outputSchema) + instructions.md + sandbox.ts (repo clone); plans, never writes
-    implementer/            # agent.ts (outputSchema) + instructions.md + sandbox.ts + tools/checkout_branch.ts + tools/push_branch.ts
-    reviewer/               # agent.ts (different vendor, outputSchema) + instructions.md + sandbox.ts + tools/checkout_branch.ts
-    researcher/             # agent.ts + instructions.md; fresh-context web researcher (web tools only)
+    analyst/                # agent.ts (outputSchema) + instructions.md + sandbox.ts (repo clone) + tools/{save,read}_artifact.ts; plans, never writes
+    implementer/            # agent.ts (outputSchema) + instructions.md + sandbox.ts + tools/checkout_branch.ts + tools/push_branch.ts + tools/read_artifact.ts
+    reviewer/               # agent.ts (different vendor, outputSchema) + instructions.md + sandbox.ts + tools/checkout_branch.ts + tools/read_artifact.ts
+    researcher/             # agent.ts + instructions.md + tools/save_artifact.ts; fresh-context web researcher
   tools/
     agent.ts                # disableTool(): the built-in agent tool would let the root bypass its stations
     get_user_preferences.ts   # Blob: load this user's saved preferences
@@ -43,11 +43,13 @@ agent/
     clear_user_preferences.ts # Blob: clear this user's preferences (approval-gated)
     read_factory_brain.ts     # Blob: load the shared factory brain (open to every run)
     update_factory_brain.ts   # Blob: write the shared factory brain (factoryBrainPolicy: trusted-write)
+    read_artifact.ts          # Blob: read a handoff artifact by id (read-only, open to every run)
   lib/
     constants.ts            # requireEnv + FACTORY_REPO/factoryRepo/FACTORY_LABEL + linearAuth
     trust.ts                # the single trust authority: AUTONOMOUS_PRINCIPAL, isAutonomous, isTrusted, isScheduleAppAuth, stampTrusted
     user-preferences.ts     # principal-scoped Blob key + reserved-prefix guard (shared helper)
     factory-brain.ts        # FACTORY_REPO-scoped Blob key + reserved-prefix guard for the shared brain
+    artifacts/              # handoff artifacts: config.ts (id pattern, kinds, reserved prefix) + tools.ts (save/read tool factories)
     github/
       credentials.ts        # GITHUB_CONNECTOR + the shared Connect credentials handle
       approval.ts           # writePolicy / commentPolicy / labelPolicy / shipPolicy / closeIssuePolicy / createPullRequestPolicy / updateIssuePolicy / factoryBrainPolicy
@@ -78,6 +80,7 @@ evals/                      # eve eval runner suite: smoke, routing/, safety/, p
 | Linear access | `agent/connections/linear.ts` | Connection (MCP) | Create issues, comment, cross-reference; app-scoped auth via `linearAuth`; denied on unattended runs |
 | User preferences | `agent/tools/{get,save,clear}_user_preferences.ts` + `agent/lib/user-preferences.ts` | Tools | Per-user standing preferences in Blob, keyed to the resolved principal (never model input) |
 | Factory brain | `agent/tools/{read,update}_factory_brain.ts` + `agent/lib/factory-brain.ts` | Tools | Shared, durable notes about the target repository in Blob, keyed to `FACTORY_REPO` (never model input); reads open to every run, writes gated by `factoryBrainPolicy` (trusted-write) |
+| Handoff artifacts | `agent/lib/artifacts/` + per-station `tools/{save,read}_artifact.ts` + root `agent/tools/read_artifact.ts` | Tools | Long Markdown documents stations pass by id in Blob: researcher and analyst save, analyst/implementer/reviewer read, the orchestrator relays only the id; ids validated by an anchored pattern so they can't escape the reserved prefix |
 | Skills | `agent/skills/` | Skill | Load-on-demand procedures: `writing-quality`, `triaging-issues`, `github-linear-bridging` |
 | Evals | `evals/` | Evals | eve eval runner: routing and safety assertions (deny-by-default over the write-tool list), an opt-in full-pipeline run |
 
@@ -89,14 +92,14 @@ Channels and the connection are I/O boundaries. Tools run in the app runtime (fu
 2. **Red CI on a factory PR:** a `check_suite` webhook with a failure conclusion, anchored to a pull request whose head branch starts with `factory/`, hits `onCheckSuite`. The session runs unattended on that PR's thread. The injected task self-limits: count earlier fix-attempt comments on the PR (each fresh session's only shared memory is the thread), stop and hand off to a person after 2, otherwise post an attempt comment, diagnose via `github__getCiFailureContext`, and run an implementer/reviewer revision that pushes to the same branch. Suites on branches people pushed never dispatch.
 3. **Attended intake (@Foreman mention):** `onComment` keeps the built-in mention and ignore rules, dispatches only for OWNER/MEMBER/COLLABORATOR commenters, and stamps `attributes.trusted`. The pipeline runs with the requester on the other end: clarifying questions go to them, reversible writes run without cards, shipping actions stop and wait for approval.
 4. **Linear sessions:** a user delegates an issue in Linear; `onAgentSession` stamps trusted and injects the requester's name. The factory works the item, posts progress as Agent Activities, and reports the PR link back on the session. Cross-tracker conventions come from the `github-linear-bridging` skill.
-5. **The pipeline itself:** the orchestrator grounds the work item (reads the real issue, dedupes via the `triaging-issues` skill), then delegates in order: classifier (text only) → optional researcher → analyst (reads its checkout) → implementer (branches, implements, verifies, `push_branch`) → reviewer (`checkout_branch`, judges the real diff). `request_changes` loops back to the implementer at most twice. Every delegation message is self-contained; stations never see the orchestrator's history.
+5. **The pipeline itself:** the orchestrator grounds the work item (reads the real issue, dedupes via the `triaging-issues` skill), then delegates in order: classifier (text only) → optional researcher → analyst (reads its checkout) → implementer (branches, implements, verifies, `push_branch`) → reviewer (`checkout_branch`, judges the real diff). `request_changes` loops back to the implementer at most twice. Every delegation message is self-contained; stations never see the orchestrator's history. Long documents skip that inline path: the researcher and analyst can save a handoff artifact and return its id in `artifact_id`, the orchestrator relays the id, and downstream stations read the document themselves with `read_artifact`.
 6. **PR opened (by someone else):** `onPullRequest` dispatches on the `opened` action (bot senders skipped, which covers `foreman[bot]`'s own PRs) with a summary task injected; the agent posts one orienting comment with a changed-files table.
 
 ## Data stores
 
 - **GitHub** (external): the repository and issue tracker the factory works on. Tool access goes through `@github-tools/eve-extension` with credentials brokered by Vercel Connect; git access in station sandboxes authenticates at the sandbox firewall (see Security).
 - **Linear** (external): where delegated work arrives and cross-references land. Access via Linear's MCP server with app-scoped Connect auth (scopes `read`, `write`, `issues:create`, `comments:create`).
-- **Vercel Blob**: per-user preferences under the reserved `user-preferences/<hashed-principal>.md` prefix, reachable only through the principal-scoped preference tools; and the shared factory brain under the reserved `factory-brain/<hashed-repo>.md` prefix, reachable only through the factory-brain tools. Authenticated by the project's OIDC token.
+- **Vercel Blob**: per-user preferences under the reserved `user-preferences/<hashed-principal>.md` prefix, reachable only through the principal-scoped preference tools; the shared factory brain under the reserved `factory-brain/<hashed-repo>.md` prefix, reachable only through the factory-brain tools; and handoff artifacts under the reserved `artifacts/<validated-id>.md` prefix, reachable only through the artifact tools. Authenticated by the project's OIDC token.
 - **Vercel Sandbox**: the root sandbox holds the channel's thread checkout; each repo-facing station's sandbox holds its own clone of `FACTORY_REPO` (cloned once per template build via `factoryBootstrap`, moved to the current default branch per session via `factoryOnSession`). Not durable application stores.
 
 There is no application database. Anything that must outlive a session (for example, cross-run sweep state for a future schedule) belongs in an external store.
@@ -107,7 +110,7 @@ There is no application database. Anything that must outlive a session (for exam
 | --- | --- | --- |
 | GitHub | Label intake, mentions, and PR events in; comments, branches, and draft PRs out | eve GitHub channel + `@github-tools/eve-extension`, both via Vercel Connect (`GITHUB_CONNECTOR`); station git via firewall-brokered installation tokens |
 | Linear (channel + MCP) | Agent Sessions in; issue creation, comments, cross-references out | eve Linear channel via Connect; MCP connection to `mcp.linear.app` with app-scoped auth shared through `linearAuth` (`LINEAR_CONNECTOR`) |
-| Vercel Blob | Per-user preference storage and the shared factory brain | `@vercel/blob`, OIDC-authenticated |
+| Vercel Blob | Per-user preference storage, the shared factory brain, and station handoff artifacts | `@vercel/blob`, OIDC-authenticated |
 | Vercel AI Gateway | Model access for the root and every station | Gateway model ids; the root model in `agent/agent.ts`, per-station models in each station's `agent.ts` (the reviewer deliberately runs a different vendor) |
 | Vercel Sandbox | Isolated runtimes: root checkout + three station clones | `agent/sandbox.ts` and `agent/subagents/*/sandbox.ts` (`vercel()` backend, shared builders in `agent/lib/github/repo-sandbox.ts`) |
 
@@ -132,6 +135,7 @@ There is no application database. Anything that must outlive a session (for exam
 - **Inbound route auth** (`agent/channels/eve.ts`): `[localDevUser, vercelOidc()]` rejects public browser traffic; channel traffic is authenticated by each connector.
 - **Per-user isolation:** the preference tools derive their Blob key from the resolved principal, never from model input; files live under the reserved `user-preferences/` prefix. `clear_user_preferences` is approval-gated (`always()`).
 - **Shared-brain integrity:** the factory-brain tools derive their Blob key from `FACTORY_REPO`, never from model input, so a session can't redirect a read or write to another object. Reads are open, but `update_factory_brain` is gated by `factoryBrainPolicy`: unattended runs are denied so an untrusted issue body can't write into the context every future run reads, trusted callers write directly, and the dev TUI waits on an approval card.
+- **Artifact-id containment:** artifact ids are the one Blob address the model supplies, so `artifactKey` accepts only ids matching the anchored `ARTIFACT_ID_PATTERN` (lowercase alphanumerics and hyphens, no dots or slashes) before interpolating them into a key under the reserved `artifacts/` prefix; an invalid id reads as `found: false`, indistinguishable from a missing one. Saves never overwrite (`allowOverwrite: false`), are size-bounded, and mint their own suffixed id, which is what lets both artifact tools live ungated inside task-mode stations.
 
 ## Development & testing
 

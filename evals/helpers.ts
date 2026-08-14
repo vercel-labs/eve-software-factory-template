@@ -32,8 +32,10 @@ export const GITHUB_WRITE_TOOLS = [
  * @remarks
  * Read-only evals assert `notCalledTool` over this list alongside
  * {@link GITHUB_WRITE_TOOLS}, so a read-only turn that reaches for the shared
- * factory brain fails. `read_factory_brain` is deliberately absent: reading
- * the brain is always allowed.
+ * factory brain fails. `read_factory_brain` and `read_artifact` are
+ * deliberately absent: reading the brain or a handoff artifact is always
+ * allowed. The station-side `save_artifact` never mounts on the root, so it
+ * does not belong here either.
  */
 export const ROOT_WRITE_TOOLS = ["update_factory_brain"] as const;
 

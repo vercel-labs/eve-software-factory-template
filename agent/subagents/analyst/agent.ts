@@ -17,7 +17,8 @@ export default defineAgent({
     "implementation plan: problem statement, approach, ordered steps, affected files, " +
     "risks, acceptance criteria, and test strategy. Planning only; writes no code. The " +
     "caller passes the work item, its classification, and any research findings in the " +
-    "message.",
+    "message, plus a research artifact id when the researcher saved a full memo. May " +
+    "save its own deep supporting detail as an analysis artifact and return the id.",
   model: MODELS.analyst,
   outputSchema: {
     additionalProperties: false,
@@ -39,6 +40,11 @@ export default defineAgent({
         description:
           "The chosen solution strategy, and briefly the main alternative rejected and why.",
         type: "string",
+      },
+      artifact_id: {
+        description:
+          "Id of the saved analysis artifact holding the full supporting detail, or null when none was saved.",
+        type: ["string", "null"],
       },
       assumptions: {
         description:
@@ -86,6 +92,7 @@ export default defineAgent({
       "test_strategy",
       "assumptions",
       "open_questions",
+      "artifact_id",
     ],
     type: "object",
   },

@@ -21,12 +21,18 @@ export default defineAgent({
   description:
     "Research a topic on the open web for facts, statistics, primary sources, and links the " +
     "caller doesn't already have. Runs refined searches against reliable sources and returns " +
-    "cited findings with confidence levels, plus the gaps it couldn't verify. The caller " +
+    "cited findings with confidence levels, plus the gaps it couldn't verify. May save a " +
+    "long research memo as an artifact and return its id for later stations. The caller " +
     "passes the question and any known context in the message.",
   model: MODELS.researcher,
   outputSchema: {
     additionalProperties: false,
     properties: {
+      artifact_id: {
+        description:
+          "Id of the saved research-notes artifact holding the full memo, or null when none was saved.",
+        type: ["string", "null"],
+      },
       findings: {
         description:
           "One entry per verified factual claim; every entry carries at least one real source.",
@@ -88,7 +94,7 @@ export default defineAgent({
         type: "string",
       },
     },
-    required: ["summary", "findings", "gaps"],
+    required: ["summary", "findings", "gaps", "artifact_id"],
     type: "object",
   },
 });

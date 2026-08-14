@@ -19,8 +19,9 @@ export default defineAgent({
     "write the code on a feature branch, run the repository's own checks, commit, and " +
     "push the branch. Returns the branch name, per-file change summary, verification " +
     "results, and deviations. The caller passes the work item, classification, and full " +
-    "analysis in the message; on a revision run it also passes the existing branch and " +
-    "the reviewer's findings.",
+    "analysis in the message, plus an artifact id when the analyst saved its full detail " +
+    "as one; on a revision run it also passes the existing branch and the reviewer's " +
+    "findings.",
   model: MODELS.implementer,
   outputSchema: {
     additionalProperties: false,
