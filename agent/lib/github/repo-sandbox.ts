@@ -4,7 +4,7 @@ import type {
   SandboxSessionContext,
 } from "eve/sandbox";
 import { FACTORY_REPO } from "../constants.js";
-import { resolveBotName } from "./bot-name.js";
+import { FALLBACK_BOT_NAME, resolveBotName } from "./bot-name.js";
 import { githubCredentials } from "./credentials.js";
 import {
   brokerPolicy,
@@ -86,13 +86,15 @@ const SAFE_BOT_NAME = /^[A-Za-z0-9._-]+$/;
  * The bot's commit identity, from the connector-resolved name.
  *
  * @remarks
- * Falls back to the static default when the resolved name carries characters
- * that don't belong in a shell-quoted git config value; connector app slugs
- * never do, but the name can also arrive from an env override.
+ * Falls back to the static default when resolution fails (a commit identity
+ * is needed even when the connector metadata is briefly unreachable) or when
+ * the resolved name carries characters that don't belong in a shell-quoted
+ * git config value; connector app slugs never do, but the name can also
+ * arrive from an env override.
  */
 async function gitIdentity(): Promise<{ email: string; name: string }> {
-  const resolved = await resolveBotName();
-  const safe = SAFE_BOT_NAME.test(resolved) ? resolved : "Foreman";
+  const resolved = await resolveBotName().catch(() => FALLBACK_BOT_NAME);
+  const safe = SAFE_BOT_NAME.test(resolved) ? resolved : FALLBACK_BOT_NAME;
   return {
     email: `${safe.toLowerCase()}[bot]@users.noreply.github.com`,
     name: `${safe}[bot]`,

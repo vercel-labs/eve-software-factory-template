@@ -10,21 +10,6 @@ import { githubCredentials } from "../lib/github/credentials.js";
 import { stampAutonomous, stampTrusted } from "../lib/trust.js";
 
 /**
- * The name the factory answers to, resolved once at module load.
- *
- * @remarks
- * Passing it to the channel config matters beyond mentions: the channel uses
- * `botName` to strip the leading mention from a reply before delivery, which
- * is what lets a reply like "@<bot> Yes" resolve a pending approval, and to
- * render the reply instruction in its built-in human-in-the-loop prompts.
- * Resolution falls back to "Foreman" if the connector metadata is briefly
- * unreachable at boot.
- */
-const BOT_NAME = await resolveBotName();
-
-const MENTION_PATTERN = mentionPattern(BOT_NAME);
-
-/**
  * Commenter roles allowed to start a session by mentioning the agent.
  *
  * @remarks
@@ -159,10 +144,15 @@ const PR_SUMMARY_TASK = [
  * - Credentials are brokered by Vercel Connect through the shared handle in
  *   `agent/lib/github/credentials.ts`; tokens are resolved per call and never
  *   exposed to the model.
- * - The name the factory answers to is resolved at runtime from the GitHub
- *   App's own slug (`agent/lib/github/bot-name.ts`), so the mention follows
- *   whatever the deployer named their app with no configuration, and a
- *   hardcoded handle can't collide with an unrelated GitHub user.
+ * - The name the factory answers to is resolved from the GitHub App's own
+ *   slug (`agent/lib/github/bot-name.ts`), so the mention follows whatever
+ *   the deployer named their app with no configuration, and a hardcoded
+ *   handle can't collide with an unrelated GitHub user. `botName` is passed
+ *   as the resolver function, not a resolved value: eve calls it on first
+ *   use inside request handling, where the deployment's OIDC token exists
+ *   (at module load it doesn't, so a value resolved here would pin the
+ *   fallback), caches a fulfilled name, and retries a rejection on the next
+ *   event.
  * - `onComment` replaces the built-in mention gate to add an authorization
  *   check: it keeps the default mention and ignore rules, then dispatches
  *   only when the commenter's `author_association` marks them as trusted with
@@ -200,13 +190,13 @@ const PR_SUMMARY_TASK = [
  * - Human-in-the-loop prompts are the channel's own (eve ≥ 0.34 posts them by
  *   default): when a session stops for approval or input, the channel renders
  *   the request as a comment with a mention-based reply instruction. Passing
- *   the resolved {@link BOT_NAME} is what makes both the instruction and the
- *   reply's mention-stripping correct, and `onComment`'s gate is what keeps a
- *   reply an authorization signal: only mentions from owners, members, and
+ *   the `botName` resolver is what makes both the instruction and the reply's
+ *   mention-stripping correct, and `onComment`'s gate is what keeps a reply
+ *   an authorization signal: only mentions from owners, members, and
  *   collaborators ever reach the waiting session.
  */
 export default githubChannel({
-  botName: BOT_NAME,
+  botName: resolveBotName,
   credentials: githubCredentials,
   onCheckSuite: (ctx, suite) => {
     const raw = suite.raw as {
@@ -229,12 +219,19 @@ export default githubChannel({
       context: [CI_FIX_TASK],
     };
   },
-  onComment: (ctx, comment) =>
-    !isIgnoredComment(comment, BOT_NAME) &&
-    MENTION_PATTERN.test(comment.body) &&
-    isTrustedCommenter(comment)
+  onComment: async (ctx, comment) => {
+    // A resolution failure means the mention can't be matched; acknowledge
+    // without dispatching and let the next event retry.
+    const botName = await resolveBotName().catch(() => null);
+    if (botName === null) {
+      return null;
+    }
+    return !isIgnoredComment(comment, botName) &&
+      mentionPattern(botName).test(comment.body) &&
+      isTrustedCommenter(comment)
       ? { auth: stampTrusted(defaultGitHubAuth(ctx)) }
-      : null,
+      : null;
+  },
   onIssue: async (ctx, issue) => {
     const { labels } = issue.raw as {
       labels?: ReadonlyArray<{ name?: unknown }>;

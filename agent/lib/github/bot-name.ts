@@ -2,10 +2,10 @@ import { getConnectorMetadata } from "@vercel/connect";
 import { GITHUB_CONNECTOR } from "./credentials.js";
 
 /**
- * Name used when nothing better can be resolved: no env override and no
- * reachable connector metadata. Matches the template's default persona.
+ * Name used where a resolution failure must not stop the work, like the
+ * sandbox commit identity. Matches the template's default persona.
  */
-const FALLBACK_BOT_NAME = "Foreman";
+export const FALLBACK_BOT_NAME = "Foreman";
 
 /**
  * Upper bound on a resolved bot name before it is interpolated into a
@@ -23,10 +23,16 @@ let resolvedFromConnector: string | undefined;
  * 1. `FACTORY_BOT_NAME`, then `GITHUB_APP_SLUG`, for explicit overrides.
  * 2. The GitHub App's own slug from the Connect connector's metadata
  *    (`vendor.appSlug`), so the mention automatically follows whatever the
- *    deployer named their app. Fetched lazily with the deployment's OIDC
- *    token and cached for the life of the instance.
- * 3. {@link FALLBACK_BOT_NAME} when the metadata is unreachable; the failure
- *    is not cached, so a transient outage doesn't pin the fallback.
+ *    deployer named their app. Fetched with the deployment's OIDC token and
+ *    cached for the life of the instance.
+ *
+ * Throws when the metadata is unreachable or carries no usable slug, and the
+ * failure is never cached. That contract is what the channel's lazy `botName`
+ * resolution relies on: eve calls this on first use inside request handling
+ * (where the OIDC token exists), caches a fulfilled name, and retries a
+ * rejection on the next event, so a transient outage can't pin a wrong name.
+ * Callers that need an answer no matter what catch and use
+ * {@link FALLBACK_BOT_NAME}.
  *
  * A hardcoded name is wrong here because the app's slug is chosen by whoever
  * registers it, and a guessed handle can belong to a real GitHub user.
@@ -39,21 +45,19 @@ export async function resolveBotName(): Promise<string> {
   if (resolvedFromConnector !== undefined) {
     return resolvedFromConnector;
   }
-  try {
-    const metadata = await getConnectorMetadata(GITHUB_CONNECTOR);
-    const slug = (metadata.vendor as { appSlug?: unknown }).appSlug;
-    if (
-      typeof slug === "string" &&
-      slug.length > 0 &&
-      slug.length <= MAX_BOT_NAME_LENGTH
-    ) {
-      resolvedFromConnector = slug;
-      return slug;
-    }
-  } catch {
-    return FALLBACK_BOT_NAME;
+  const metadata = await getConnectorMetadata(GITHUB_CONNECTOR);
+  const slug = (metadata.vendor as { appSlug?: unknown }).appSlug;
+  if (
+    typeof slug !== "string" ||
+    slug.length === 0 ||
+    slug.length > MAX_BOT_NAME_LENGTH
+  ) {
+    throw new Error(
+      `Connector ${GITHUB_CONNECTOR} metadata carries no usable GitHub App slug.`
+    );
   }
-  return FALLBACK_BOT_NAME;
+  resolvedFromConnector = slug;
+  return slug;
 }
 
 /**
