@@ -1,6 +1,6 @@
-import { get, put } from "@vercel/blob";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
+import { readDocument, writeDocument } from "../blob.js";
 import {
   ARTIFACT_KINDS,
   artifactId,
@@ -57,12 +57,7 @@ export const saveArtifactTool = () =>
         return { error: "Could not build a valid artifact id.", saved: false };
       }
       try {
-        await put(key, markdown, {
-          access: "public",
-          addRandomSuffix: false,
-          allowOverwrite: false,
-          contentType: "text/markdown",
-        });
+        await writeDocument(key, markdown, { allowOverwrite: false });
         return { id, kind, saved: true, title };
       } catch (error) {
         return {
@@ -136,18 +131,15 @@ export const readArtifactTool = () =>
         return { found: false };
       }
       try {
-        const result = await get(key, {
-          access: "public",
-        });
-        if (!result?.stream) {
+        const doc = await readDocument(key);
+        if (!doc.found) {
           return { found: false };
         }
-        const markdown = await new Response(result.stream).text();
         return {
-          createdAt: result.blob.uploadedAt.toISOString(),
+          createdAt: doc.uploadedAt,
           found: true,
           id,
-          markdown,
+          markdown: doc.content,
         };
       } catch {
         return { found: false };

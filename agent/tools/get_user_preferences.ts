@@ -1,6 +1,6 @@
-import { list } from "@vercel/blob";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
+import { readDocument } from "#lib/blob.js";
 import { userPreferencesKey } from "#lib/user-preferences.js";
 
 /**
@@ -33,20 +33,11 @@ export default defineTool({
       };
     }
     try {
-      const { blobs } = await list({ limit: 1, prefix: key });
-      const blob = blobs.find((b) => b.pathname === key);
-      if (!blob) {
+      const doc = await readDocument(key);
+      if (!doc.found) {
         return { found: false, preferences: "" };
       }
-      const response = await fetch(blob.url);
-      if (!response.ok) {
-        return {
-          error: `Failed to read preferences: ${response.status} ${response.statusText}`,
-          found: false,
-          preferences: "",
-        };
-      }
-      return { found: true, preferences: await response.text() };
+      return { found: true, preferences: doc.content };
     } catch (error) {
       return {
         error:

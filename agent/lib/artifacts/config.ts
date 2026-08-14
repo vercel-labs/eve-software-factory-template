@@ -1,3 +1,5 @@
+import { ARTIFACTS_PREFIX } from "../blob.js";
+
 /**
  * Key layout, bounds, and id handling for handoff artifacts.
  *
@@ -11,18 +13,12 @@
  * Ids are model-supplied on read, which is why {@link ARTIFACT_ID_PATTERN} is strict rather than
  * forgiving. Without it a caller could pass `../factory-brain/<hash>.md` and read a managed
  * document through a tool that was never meant to reach one.
- */
-
-/**
- * Reserved Blob path prefix for handoff artifacts.
  *
- * @remarks
- * The artifact tools own this prefix exclusively. Any general-purpose Blob tool must treat it as
- * off-limits (see `isReservedArtifactPath` / `isReservedArtifactUrl`) so it can't be used as a
- * side channel to read or overwrite a handoff document: artifacts are only reachable through the
- * `save_artifact` and `read_artifact` tools, by a validated id.
+ * Artifacts live under the reserved `artifacts/` prefix. The prefix and its guards come from
+ * the reserved-namespace registry in `../blob.js`, which is what keeps any general-purpose Blob
+ * tool from reaching a handoff document; this module keeps the namespace reachable only by a
+ * validated id.
  */
-export const ARTIFACTS_PREFIX = "artifacts/";
 
 /**
  * Maximum size of an artifact's Markdown body, in characters.
@@ -70,39 +66,6 @@ export const ARTIFACT_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
  * Length of the random suffix appended to an artifact id.
  */
 const SUFFIX_LENGTH = 6;
-
-/** Leading slashes stripped from a URL pathname before the reserved-prefix check. */
-const LEADING_SLASHES = /^\/+/;
-
-/**
- * Whether a Blob pathname falls under the reserved artifacts prefix.
- *
- * @param pathname - A Blob object pathname (no leading slash), e.g. `drafts/post.md`.
- * @returns `true` when the path is reserved for handoff artifacts.
- */
-export const isReservedArtifactPath = (pathname: string): boolean =>
-  pathname.startsWith(ARTIFACTS_PREFIX);
-
-/**
- * Whether a Blob URL points at a reserved handoff artifact.
- *
- * @remarks
- * A public Blob URL embeds the object pathname as its URL path, so the reserved-prefix check
- * applies to the URL's pathname. Unparseable input is treated as not reserved; the caller's own
- * URL validation handles malformed URLs.
- *
- * @param url - A full Blob URL.
- * @returns `true` when the URL addresses a reserved handoff artifact.
- */
-export const isReservedArtifactUrl = (url: string): boolean => {
-  try {
-    return isReservedArtifactPath(
-      new URL(url).pathname.replace(LEADING_SLASHES, "")
-    );
-  } catch {
-    return false;
-  }
-};
 
 /**
  * Reduce a title to the slug portion of an id.

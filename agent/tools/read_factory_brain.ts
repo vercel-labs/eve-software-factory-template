@@ -1,6 +1,6 @@
-import { list } from "@vercel/blob";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
+import { readDocument } from "#lib/blob.js";
 import { factoryBrainKey } from "#lib/factory-brain.js";
 
 /**
@@ -28,20 +28,11 @@ export default defineTool({
   async execute() {
     const key = factoryBrainKey();
     try {
-      const { blobs } = await list({ limit: 1, prefix: key });
-      const blob = blobs.find((b) => b.pathname === key);
-      if (!blob) {
+      const doc = await readDocument(key);
+      if (!doc.found) {
         return { brain: "", found: false };
       }
-      const response = await fetch(blob.url);
-      if (!response.ok) {
-        return {
-          brain: "",
-          error: `Failed to read the factory brain: ${response.status} ${response.statusText}`,
-          found: false,
-        };
-      }
-      return { brain: await response.text(), found: true };
+      return { brain: doc.content, found: true };
     } catch (error) {
       return {
         brain: "",

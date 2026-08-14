@@ -1,7 +1,7 @@
-import { del, list } from "@vercel/blob";
 import { defineTool } from "eve/tools";
 import { always } from "eve/tools/approval";
 import { z } from "zod";
+import { deleteDocument } from "#lib/blob.js";
 import { userPreferencesKey } from "#lib/user-preferences.js";
 
 /**
@@ -36,13 +36,8 @@ export default defineTool({
       };
     }
     try {
-      const { blobs } = await list({ limit: 1, prefix: key });
-      const blob = blobs.find((b) => b.pathname === key);
-      if (!blob) {
-        return { deleted: false, success: true };
-      }
-      await del(blob.url);
-      return { deleted: true, success: true };
+      const { existed } = await deleteDocument(key);
+      return { deleted: existed, success: true };
     } catch (error) {
       return {
         deleted: false,

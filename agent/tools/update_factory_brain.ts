@@ -1,6 +1,6 @@
-import { put } from "@vercel/blob";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
+import { writeDocument } from "#lib/blob.js";
 import {
   factoryBrainKey,
   MAX_FACTORY_BRAIN_LENGTH,
@@ -37,12 +37,7 @@ export default defineTool({
   async execute({ brain }) {
     const key = factoryBrainKey();
     try {
-      const blob = await put(key, brain, {
-        access: "public",
-        addRandomSuffix: false,
-        allowOverwrite: true,
-        contentType: "text/markdown",
-      });
+      const blob = await writeDocument(key, brain, { allowOverwrite: true });
       return { pathname: blob.pathname, success: true };
     } catch (error) {
       return {

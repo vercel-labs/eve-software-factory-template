@@ -47,9 +47,10 @@ agent/
   lib/
     constants.ts            # requireEnv + FACTORY_REPO/factoryRepo/FACTORY_LABEL + linearAuth
     trust.ts                # the single trust authority: AUTONOMOUS_PRINCIPAL, isAutonomous, isTrusted, isScheduleAppAuth, stampTrusted
-    user-preferences.ts     # principal-scoped Blob key + reserved-prefix guard (shared helper)
-    factory-brain.ts        # FACTORY_REPO-scoped Blob key + reserved-prefix guard for the shared brain
-    artifacts/              # handoff artifacts: config.ts (id pattern, kinds, reserved prefix) + tools.ts (save/read tool factories)
+    blob.ts                 # the shared Blob layer: reserved-namespace registry (all prefixes + guards) and read/write/delete document helpers
+    user-preferences.ts     # principal-scoped Blob key derivation
+    factory-brain.ts        # FACTORY_REPO-scoped Blob key derivation + size bound
+    artifacts/              # handoff artifacts: config.ts (id pattern, kinds) + tools.ts (save/read tool factories)
     github/
       credentials.ts        # GITHUB_CONNECTOR + the shared Connect credentials handle
       approval.ts           # writePolicy / commentPolicy / labelPolicy / shipPolicy / closeIssuePolicy / createPullRequestPolicy / updateIssuePolicy / factoryBrainPolicy

@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
+import { USER_PREFERENCES_PREFIX } from "./blob.js";
 
 /**
- * Reserved Blob path prefix for per-user preference files.
+ * Key derivation for per-user preference files.
  *
  * @remarks
- * The user-preferences tools own this prefix exclusively. Any general-purpose Blob tool must
- * treat it as off-limits (see `isReservedUserPath` / `isReservedUserUrl`) so it can't be used as
- * a side channel to read or overwrite another user's preferences — those files are only
- * reachable through the principal-scoped preference tools.
+ * Preference files live under the reserved `user-preferences/` prefix, owned by the
+ * principal-scoped preference tools. The prefix and its guards come from the reserved-namespace
+ * registry in `./blob.js`, which is what keeps any general-purpose Blob tool from using the
+ * namespace as a side channel to read or overwrite another user's preferences.
  */
-export const USER_PREFERENCES_PREFIX = "user-preferences/";
 
 /**
  * The current user's principal, as projected onto a tool's `ctx.session.auth.current`.
@@ -22,39 +22,6 @@ type UserPrincipal =
   | { readonly principalId: string; readonly principalType: string }
   | null
   | undefined;
-
-/**
- * Whether a Blob pathname falls under the reserved user-preferences prefix.
- *
- * @param pathname - A Blob object pathname (no leading slash), e.g. `drafts/post.md`.
- * @returns `true` when the path is reserved for user preferences.
- */
-export const isReservedUserPath = (pathname: string): boolean =>
-  pathname.startsWith(USER_PREFERENCES_PREFIX);
-
-/** Leading slashes stripped from a URL pathname before the reserved-prefix check. */
-const LEADING_SLASHES = /^\/+/;
-
-/**
- * Whether a Blob URL points at a reserved user-preferences object.
- *
- * @remarks
- * A public Blob URL embeds the object pathname as its URL path, so the reserved-prefix check
- * applies to the URL's pathname. Unparseable input is treated as not reserved; the caller's own
- * URL validation handles malformed URLs.
- *
- * @param url - A full Blob URL.
- * @returns `true` when the URL addresses a reserved user-preferences object.
- */
-export const isReservedUserUrl = (url: string): boolean => {
-  try {
-    return isReservedUserPath(
-      new URL(url).pathname.replace(LEADING_SLASHES, "")
-    );
-  } catch {
-    return false;
-  }
-};
 
 /**
  * Resolve the Blob key holding the current user's preferences.
