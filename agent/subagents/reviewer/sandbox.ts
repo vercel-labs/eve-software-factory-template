@@ -1,6 +1,7 @@
 import { defineSandbox } from "eve/sandbox";
 import { vercel } from "eve/sandbox/vercel";
 import {
+  FACTORY_SANDBOX_CREATE_OPTIONS,
   factoryBootstrap,
   factoryOnSession,
   factoryRevalidationKey,
@@ -18,7 +19,7 @@ import {
  * implementer's working state.
  */
 export default defineSandbox({
-  backend: vercel(),
+  backend: vercel(FACTORY_SANDBOX_CREATE_OPTIONS),
   bootstrap: factoryBootstrap,
   onSession: factoryOnSession,
   revalidationKey: factoryRevalidationKey,

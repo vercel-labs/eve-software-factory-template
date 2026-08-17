@@ -1,5 +1,6 @@
 import { defineSandbox, type SandboxSessionContext } from "eve/sandbox";
 import { vercel } from "eve/sandbox/vercel";
+import { FACTORY_SANDBOX_CREATE_OPTIONS } from "./lib/github/repo-sandbox.js";
 
 /**
  * Root agent sandbox configuration.
@@ -19,7 +20,7 @@ import { vercel } from "eve/sandbox/vercel";
  * @see {@link https://vercel.com/docs/sandbox | Vercel Sandbox}
  */
 export default defineSandbox({
-  backend: vercel(),
+  backend: vercel(FACTORY_SANDBOX_CREATE_OPTIONS),
   async onSession({ use }: SandboxSessionContext): Promise<void> {
     const sandbox = await use();
     const result = await sandbox.run({

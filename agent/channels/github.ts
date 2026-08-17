@@ -96,7 +96,7 @@ const FACTORY_INTAKE_TASK = [
   `This issue was handed to the factory with the "${FACTORY_LABEL}" label, and this run is unattended: nobody is watching to answer a question or approve an action, so never use ask_question and never attempt an action that needs approval.`,
   "Run the work item through the full pipeline. If the classifier needs clarification, post its questions as a comment on the issue and stop; someone will re-label the issue when they've answered.",
   "Keep the requester in the loop as you go: post a short comment on this issue when a station completes, except the last one. Comments on this issue are the one conversational write this run has; you cannot comment anywhere else.",
-  "Deliver the finished work as a draft pull request, then end the run with a reply that links it. The reply is delivered to this issue by the channel and replaces the progress comment for this final step; never announce the pull request with the comment tool.",
+  "Deliver the finished work as a draft pull request. The message you end the run with appears on this issue for you: link the pull request there, and let it stand in for the progress comment for this final step.",
 ].join("\n\n");
 
 /**
