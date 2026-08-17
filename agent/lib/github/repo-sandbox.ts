@@ -3,6 +3,7 @@ import type {
   SandboxSession,
   SandboxSessionContext,
 } from "eve/sandbox";
+import type { VercelSandboxCreateOptions } from "eve/sandbox/vercel";
 import { FACTORY_REPO } from "../constants.js";
 import { FALLBACK_BOT_NAME, resolveBotName } from "./bot-name.js";
 import { githubCredentials } from "./credentials.js";
@@ -11,6 +12,17 @@ import {
   mintInstallationToken,
   REMOTE_URL,
 } from "./git-remote.js";
+
+// Snapshot settings shared by every factory sandbox. One kept snapshot keeps
+// storage flat across template rebuilds; the 14-day expiration (Vercel removes
+// unresumable sandboxes after 14 days anyway) stops a quiet stretch from
+// expiring the template and making the next session queue behind a full
+// clone-and-setup rebuild.
+export const FACTORY_SANDBOX_CREATE_OPTIONS = {
+  keepLastSnapshots: { count: 1, deleteEvicted: true },
+  resources: { vcpus: 4 },
+  snapshotExpiration: 14 * 24 * 60 * 60 * 1000,
+} satisfies VercelSandboxCreateOptions;
 
 /**
  * Runs a command in the sandbox and throws on a nonzero exit, so a broken
