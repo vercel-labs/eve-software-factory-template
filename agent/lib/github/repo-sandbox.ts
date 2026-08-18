@@ -5,6 +5,12 @@ import type {
 } from "eve/sandbox";
 import type { VercelSandboxCreateOptions } from "eve/sandbox/vercel";
 import { FACTORY_REPO } from "../constants.js";
+import {
+  appAccessMessage,
+  describeCloneFailure,
+  safeErrorMessage,
+  sanitizeCommandOutput,
+} from "./bootstrap-diagnostics.js";
 import { FALLBACK_BOT_NAME, resolveBotName } from "./bot-name.js";
 import { githubCredentials } from "./credentials.js";
 import {
@@ -36,10 +42,26 @@ async function runOrThrow(
   const result = await sandbox.run({ command });
   if (result.exitCode !== 0) {
     throw new Error(
-      `Sandbox command failed (exit ${result.exitCode}): ${command}\n${String(
-        result.stderr || result.stdout
-      ).trim()}`
+      sanitizeCommandOutput(
+        `Sandbox command failed (exit ${result.exitCode}): ${command}\n${String(
+          result.stderr || result.stdout
+        ).trim()}`
+      )
     );
+  }
+}
+
+// Mints the brokered installation token, translating a refusal (typically
+// "App authorization required" from Connect) into the actionable message.
+// The original error rides along as the cause; the token itself never
+// appears in either.
+async function mintTokenOrExplain(
+  mint: () => Promise<string>
+): Promise<string> {
+  try {
+    return await mint();
+  } catch (error) {
+    throw new Error(appAccessMessage(FACTORY_REPO), { cause: error });
   }
 }
 
@@ -70,15 +92,27 @@ export function factoryRevalidationKey(): string {
  *   template build lands in the builder's home directory, which is not
  *   guaranteed to be the session user's, so it belongs in
  *   {@link factoryOnSession}.
+ * - Failures are translated into messages that name `FACTORY_REPO` and the
+ *   fix (see `bootstrap-diagnostics.ts`), keep the original error as the
+ *   cause, and never carry the token.
  */
 export async function factoryBootstrap({
   use,
 }: SandboxBootstrapContext): Promise<void> {
   const sandbox = await use();
-  const token = await mintInstallationToken(githubCredentials);
+  const token = await mintTokenOrExplain(() =>
+    mintInstallationToken(githubCredentials)
+  );
   await sandbox.setNetworkPolicy(brokerPolicy(token));
   try {
-    await runOrThrow(sandbox, `git clone --depth 50 ${REMOTE_URL} repo`);
+    try {
+      await runOrThrow(sandbox, `git clone --depth 50 ${REMOTE_URL} repo`);
+    } catch (error) {
+      throw new Error(
+        describeCloneFailure(FACTORY_REPO, safeErrorMessage(error)),
+        { cause: error }
+      );
+    }
     const setup = process.env.FACTORY_SETUP_COMMAND;
     if (setup) {
       await runOrThrow(sandbox, `cd repo && ${setup}`);
@@ -137,7 +171,9 @@ export async function factoryOnSession({
     sandbox,
     `git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/repo && git config --global user.name "${identity.name}" && git config --global user.email "${identity.email}"`
   );
-  const token = await mintInstallationToken(githubCredentials);
+  const token = await mintTokenOrExplain(() =>
+    mintInstallationToken(githubCredentials)
+  );
   await sandbox.setNetworkPolicy(brokerPolicy(token));
   try {
     await runOrThrow(

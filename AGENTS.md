@@ -48,7 +48,6 @@ pnpm validate       # check + typecheck + eve info in one command
 - Linting and formatting are handled by **Ultracite** (a Biome preset). Run `pnpm check` before finishing and `pnpm fix` to auto-fix. Config is in `biome.jsonc`; the kebab-case filename rule is disabled there because eve tools use snake_case names.
 - TypeScript strict; ESM with `NodeNext` resolution (relative imports need a `.js` extension). Prefer `const`, arrow functions, optional chaining / nullish coalescing.
 - Validate tool input/output with `zod` schemas.
-- Comments are single-line only: no multi-line or block comments (no `/* */`, no `/** */` TSDoc blocks). Keep them reasonable and sparse, a brief `//` note where it earns its place, and prefer self-documenting names and structure over commentary.
 - Prose in markdown files is not hard-wrapped: write each paragraph or bullet as one line.
 - Agent-facing text (instructions, skill bodies, tool and subagent descriptions) follows the "How you write" rules in `agent/instructions.ts`: no em dashes, no machine-made words, no bold for emphasis. It carries behavior only, never framework plumbing (how approvals render, sign-in flows) or references to tools and skills the reading agent can't access — station instructions especially, since stations see none of the root's surface.
 

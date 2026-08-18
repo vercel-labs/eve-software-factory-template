@@ -34,14 +34,19 @@ export function requireEnv(name: string, example: string): string {
  */
 export const FACTORY_REPO = requireEnv("FACTORY_REPO", "acme/widgets");
 
-const [factoryOwner, factoryRepoName, ...factoryRepoRest] =
-  FACTORY_REPO.split("/");
+// GitHub's own naming rules: owner is alphanumeric with inner hyphens, repo
+// adds dots and underscores. Catching a malformed value here fails discovery
+// with a clear message instead of a cryptic clone error at template build.
+const FACTORY_REPO_PATTERN =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/;
 
-if (!(factoryOwner && factoryRepoName) || factoryRepoRest.length > 0) {
+if (!FACTORY_REPO_PATTERN.test(FACTORY_REPO)) {
   throw new Error(
-    `FACTORY_REPO must be an "owner/repo" pair (e.g. 'acme/widgets'), got '${FACTORY_REPO}'.`
+    `FACTORY_REPO must reference an existing GitHub repository in owner/repo format (e.g. 'acme/widgets'), got '${FACTORY_REPO}'.`
   );
 }
+
+const [factoryOwner = "", factoryRepoName = ""] = FACTORY_REPO.split("/");
 
 /**
  * {@link FACTORY_REPO} split into the `owner` / `repo` fields GitHub tools
