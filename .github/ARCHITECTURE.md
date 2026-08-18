@@ -4,10 +4,10 @@ A map of how this agent is put together, for humans and AI agents working in the
 
 ## Project identification
 
-- **Name:** eve Software Factory (bot name Foreman)
-- **Maintainer:** Vercel Labs
+- **Name:** eve Software Factory
+- **Maintainer:** Vercel Labs (Ben Sabic)
 - **License:** MIT
-- **Last updated:** 2026-08-14
+- **Last updated:** 2026-08-18
 
 ## Overview
 
