@@ -23,15 +23,15 @@
     "@github-tools/eve-extension": "^0.3.2",
     "@vercel/blob": "^2.8.0",
     "@vercel/connect": "0.8.0",
-    "ai": "^7.0.63",
-    "eve": "^0.39.0",
+    "ai": "^7.0.70",
+    "eve": "^0.39.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.8",
+    "@biomejs/biome": "^2.5.9",
     "@types/node": "~24.13.3",
     "typescript": "7.0.2",
-    "ultracite": "^7.10.2"
+    "ultracite": "^7.10.5"
   },
   "engines": {
     "node": "24.x"
