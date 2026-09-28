@@ -20,8 +20,8 @@ import {
  *
  * Key layout, id format, and bounds live in `config.ts`; this module is the tool interface over
  * it. Both tools are inert by construction (validated ids, no overwrite, bounded size), so they
- * are safe inside task-mode stations that cannot park on approval. Authorization resolves from
- * the ambient Vercel OIDC credentials.
+ * need no approval gate inside a station's own tool surface. Authorization resolves from the
+ * ambient Vercel OIDC credentials.
  */
 
 /**

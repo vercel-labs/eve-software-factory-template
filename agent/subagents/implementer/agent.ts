@@ -12,6 +12,11 @@ import { MODELS } from "../../lib/models.js";
  * branches only (main and master are refused in code), the credential is
  * brokered at the sandbox firewall, and a branch alone can't merge. The pull
  * request is opened later by the orchestrator, after review.
+ *
+ * `tool: false` hides the station from the orchestrator; it calls it through
+ * the `run_implementer` workflow tool, which attaches the output schema.
+ * The wrapper cannot share this name: the compiler rejects a tool and a local
+ * subagent with the same public name, even with `tool: false`.
  */
 export default defineAgent({
   description:
@@ -23,77 +28,5 @@ export default defineAgent({
     "as one; on a revision run it also passes the existing branch and the reviewer's " +
     "findings.",
   model: MODELS.implementer,
-  outputSchema: {
-    additionalProperties: false,
-    properties: {
-      base: {
-        description:
-          "The branch the work is based on, normally the repository's default branch.",
-        type: "string",
-      },
-      branch: {
-        description: "The feature branch the work was committed and pushed to.",
-        type: "string",
-      },
-      change_summary: {
-        description: "What changed and why, per file.",
-        items: {
-          additionalProperties: false,
-          properties: {
-            change: {
-              description: "What changed in this file and why.",
-              type: "string",
-            },
-            path: { description: "The file path.", type: "string" },
-          },
-          required: ["path", "change"],
-          type: "object",
-        },
-        type: "array",
-      },
-      deviations: {
-        description:
-          "Departures from the plan, each with its reason; empty when the plan held.",
-        items: { type: "string" },
-        type: "array",
-      },
-      known_limitations: {
-        description: "Anything the reviewer should scrutinize.",
-        items: { type: "string" },
-        type: "array",
-      },
-      pushed: {
-        description:
-          "Whether push_branch succeeded; when false, the failure reason is in known_limitations.",
-        type: "boolean",
-      },
-      verification: {
-        description: "Commands run and what they produced, exactly.",
-        items: {
-          additionalProperties: false,
-          properties: {
-            command: { description: "The command as run.", type: "string" },
-            result: {
-              description:
-                "What it produced: pass/fail and the relevant output.",
-              type: "string",
-            },
-          },
-          required: ["command", "result"],
-          type: "object",
-        },
-        type: "array",
-      },
-    },
-    required: [
-      "branch",
-      "base",
-      "pushed",
-      "change_summary",
-      "verification",
-      "deviations",
-      "known_limitations",
-    ],
-    type: "object",
-  },
+  tool: false,
 });
