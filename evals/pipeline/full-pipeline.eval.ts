@@ -16,11 +16,9 @@ export default defineEval({
     t.eventsSatisfy("stations ran in pipeline order", (events) =>
       calledInOrder(events, [...STATIONS])
     );
-    t.judge.autoevals
-      .closedQA(
-        "Does the submission report completed work and point at a concrete deliverable, naming a branch or a draft pull request (a link or an identifier), with a review verdict?"
-      )
-      .atLeast(0.5);
+    t.judge(
+      "Does the submission report completed work and point at a concrete deliverable, naming a branch or a draft pull request (a link or an identifier), with a review verdict?"
+    ).atLeast(0.5);
   },
   timeoutMs: 1_800_000,
 });

@@ -12,6 +12,11 @@ import { MODELS } from "../../lib/models.js";
  * criteria; it never modifies code. Its verdict routes the pipeline: approve
  * ships a draft PR, request_changes loops back to the implementer (at most
  * twice), reject stops the line.
+ *
+ * `tool: false` hides the station from the orchestrator; it calls it through
+ * the `run_reviewer` workflow tool, which attaches the output schema.
+ * The wrapper cannot share this name: the compiler rejects a tool and a local
+ * subagent with the same public name, even with `tool: false`.
  */
 export default defineAgent({
   description:
@@ -22,58 +27,5 @@ export default defineAgent({
     "branch name, and the implementer's report in the message, plus an artifact id when " +
     "the analyst saved its full detail as one.",
   model: MODELS.reviewer,
-  outputSchema: {
-    additionalProperties: false,
-    properties: {
-      blocking_findings: {
-        description:
-          "Problems that block shipping: each names where it is, what is wrong, and why it matters.",
-        items: { type: "string" },
-        type: "array",
-      },
-      criteria_results: {
-        description:
-          "One entry per acceptance criterion from the analysis, judged individually.",
-        items: {
-          additionalProperties: false,
-          properties: {
-            criterion: {
-              description: "The acceptance criterion, verbatim.",
-              type: "string",
-            },
-            evidence: {
-              description:
-                "What in the diff or verification output shows it passing or failing.",
-              type: "string",
-            },
-            pass: { type: "boolean" },
-          },
-          required: ["criterion", "pass", "evidence"],
-          type: "object",
-        },
-        type: "array",
-      },
-      suggestions: {
-        description: "Advisory notes that do not block shipping.",
-        items: { type: "string" },
-        type: "array",
-      },
-      summary: {
-        description: "One paragraph: the verdict and what drove it.",
-        type: "string",
-      },
-      verdict: {
-        enum: ["approve", "request_changes", "reject"],
-        type: "string",
-      },
-    },
-    required: [
-      "verdict",
-      "criteria_results",
-      "blocking_findings",
-      "suggestions",
-      "summary",
-    ],
-    type: "object",
-  },
+  tool: false,
 });

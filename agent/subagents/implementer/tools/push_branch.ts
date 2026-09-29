@@ -8,19 +8,20 @@ import {
   REPO_DIR,
   validateBranch,
 } from "../../../lib/github/git-remote.js";
+import { environment } from "../sandbox.js";
 
 /**
  * Pushes a committed feature branch of the sandbox checkout to the factory
  * repository.
  *
  * @remarks
- * The push is inert by construction, which is why it runs without approval
- * inside a task-mode station: `validateBranch` refuses `main`, `master`, and
- * anything that isn't a plain branch name, so nothing this tool does can
- * change the default branch or merge. The credential is brokered at the
- * sandbox firewall and never enters the sandbox, and the push targets
- * {@link REMOTE_URL} literally, never the model-writable `origin` remote. The
- * `finally` block drops the brokered credential again.
+ * The push is inert by construction, which is why it runs without approval:
+ * `validateBranch` refuses `main`, `master`, and anything that isn't a plain
+ * branch name, so nothing this tool does can change the default branch or
+ * merge. The credential is brokered at the sandbox firewall and never enters
+ * the sandbox, and the push targets {@link REMOTE_URL} literally, never the
+ * model-writable `origin` remote. The `finally` block drops the brokered
+ * credential again.
  */
 export default defineTool({
   description: `Push a local branch of the ${REPO_DIR} checkout to the factory repository. The branch must already exist locally with the work committed and the checks run; main and master are refused. After a successful push, report the branch name in your structured output so the orchestrator can open the pull request.`,
@@ -29,7 +30,7 @@ export default defineTool({
     if (refusal) {
       return { error: refusal, success: false as const };
     }
-    const sandbox = await ctx.getSandbox();
+    const sandbox = await ctx.getSandbox(environment);
     const token = await mintInstallationToken(githubCredentials);
     await sandbox.setNetworkPolicy(brokerPolicy(token));
     try {

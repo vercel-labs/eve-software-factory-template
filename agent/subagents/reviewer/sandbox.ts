@@ -1,10 +1,7 @@
 import { defineSandbox } from "eve/sandbox";
-import { vercel } from "eve/sandbox/vercel";
 import {
-  FACTORY_SANDBOX_CREATE_OPTIONS,
-  factoryBootstrap,
-  factoryOnSession,
-  factoryRevalidationKey,
+  createFactoryEnvironment,
+  factoryInit,
 } from "../../lib/github/repo-sandbox.js";
 
 /**
@@ -18,9 +15,10 @@ import {
  * implementer is deliberate: the reviewer sees the pushed branch, not the
  * implementer's working state.
  */
-export default defineSandbox({
-  backend: vercel(FACTORY_SANDBOX_CREATE_OPTIONS),
-  bootstrap: factoryBootstrap,
-  onSession: factoryOnSession,
-  revalidationKey: factoryRevalidationKey,
+export const environment = createFactoryEnvironment();
+
+export default defineSandbox(async () => {
+  const sandbox = await environment.open();
+  await factoryInit(sandbox);
+  return sandbox;
 });

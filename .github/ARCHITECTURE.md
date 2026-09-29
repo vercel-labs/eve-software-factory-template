@@ -7,7 +7,7 @@ A map of how this agent is put together, for humans and AI agents working in the
 - **Name:** eve Software Factory
 - **Maintainer:** Vercel Labs (Ben Sabic)
 - **License:** MIT
-- **Last updated:** 2026-08-18
+- **Last updated:** 2026-09-28
 
 ## Overview
 
@@ -31,13 +31,17 @@ agent/
     github.ts               # @github-tools/eve-extension mount: explicit include allowlist, FACTORY_REPO context, approval policies from lib/github/approval.ts; tools appear as github__<name>
   sandbox.ts                # root sandbox (Vercel Sandbox); the GitHub channel checks the triggering thread's ref out here
   subagents/
-    classifier/             # agent.ts (outputSchema) + instructions.md; text-only triage
-    analyst/                # agent.ts (outputSchema) + instructions.md + sandbox.ts (repo clone) + tools/{save,read}_artifact.ts; plans, never writes
-    implementer/            # agent.ts (outputSchema) + instructions.md + sandbox.ts + tools/checkout_branch.ts + tools/push_branch.ts + tools/read_artifact.ts
-    reviewer/               # agent.ts (different vendor, outputSchema) + instructions.md + sandbox.ts + tools/checkout_branch.ts + tools/read_artifact.ts
-    researcher/             # agent.ts + instructions.md + tools/save_artifact.ts; fresh-context web researcher
+    classifier/             # agent.ts (tool: false) + instructions.md; text-only triage
+    analyst/                # agent.ts (tool: false) + instructions.md + sandbox.ts (repo clone) + tools/{save,read}_artifact.ts; plans, never writes
+    implementer/            # agent.ts (tool: false) + instructions.md + sandbox.ts + tools/checkout_branch.ts + tools/push_branch.ts + tools/read_artifact.ts
+    reviewer/               # agent.ts (different vendor, tool: false) + instructions.md + sandbox.ts + tools/checkout_branch.ts + tools/read_artifact.ts
+    researcher/             # agent.ts (tool: false) + instructions.md + tools/save_artifact.ts; fresh-context web researcher
   tools/
     agent.ts                # disableTool(): the built-in agent tool would let the root bypass its stations
+    run_classifier.ts, run_researcher.ts, run_analyst.ts, run_implementer.ts, run_reviewer.ts
+                             # defineWorkflowTool wrappers: the model-facing entry point for each station, since
+                             # defineAgent no longer carries an outputSchema. Each blocks on ctx.agent(id, { message,
+                             # outputSchema }), attaching the matching schema from lib/stations/schemas.ts.
     get_user_preferences.ts   # Blob: load this user's saved preferences
     save_user_preferences.ts  # Blob: save standing preferences (principal-scoped)
     clear_user_preferences.ts # Blob: clear this user's preferences (approval-gated)
@@ -51,11 +55,13 @@ agent/
     user-preferences.ts     # principal-scoped Blob key derivation
     factory-brain.ts        # FACTORY_REPO-scoped Blob key derivation + size bound
     artifacts/              # handoff artifacts: config.ts (id pattern, kinds) + tools.ts (save/read tool factories)
+    stations/
+      schemas.ts            # the five stations' JSON output schemas, shared by each station's run_<id>.ts wrapper
     github/
       credentials.ts        # GITHUB_CONNECTOR + the shared Connect credentials handle
       approval.ts           # writePolicy / commentPolicy / labelPolicy / shipPolicy / closeIssuePolicy / createPullRequestPolicy / updateIssuePolicy / factoryBrainPolicy
       git-remote.ts         # validateBranch, brokerPolicy (firewall credential), mintInstallationToken, REMOTE_URL, REPO_DIR
-      repo-sandbox.ts       # factoryBootstrap / factoryOnSession / factoryRevalidationKey shared by the three station sandboxes
+      repo-sandbox.ts       # createFactoryEnvironment / factoryInit shared by the three station sandboxes
   skills/                   # load-on-demand procedures, routed by description frontmatter
     writing-quality/        # AI-tells, plain English, prose specs
     triaging-issues/        # grounding a GitHub work item: dedupe, repo-native labels, ask-or-proceed, repro requests
@@ -73,11 +79,11 @@ evals/                      # eve eval runner suite: smoke, routing/, safety/, p
 | Route auth | `agent/channels/eve.ts` | Channel | Inbound auth for the eve route; the `localDevUser` shim upgrades the dev principal to a user so user-scoped features work in the dev TUI |
 | GitHub tools | `agent/extensions/github.ts` | Extension | The orchestrator's GitHub surface as `github__*` tools: reads, triage writes, PR authoring; an explicit allowlist (no preset, no merge tools) with approval predicates doubling as the authorization policy |
 | Trust authority | `agent/lib/trust.ts` | Library | The only place caller trust is defined: trusted (stamped at dispatch), autonomous (label intake), schedule app auth; new capabilities gate on these predicates rather than inventing their own checks |
-| classifier | `agent/subagents/classifier/` | Subagent | Task-mode triage on a fast model; returns type/priority/complexity/area/actionable/needs_clarification |
-| analyst | `agent/subagents/analyst/` | Subagent | Task-mode planning against its own repo checkout; returns problem statement, approach, plan, risks, acceptance criteria, test strategy |
-| implementer | `agent/subagents/implementer/` | Subagent | Task-mode implementation in its own checkout: branch, code, run the repo's checks, commit, `push_branch`; returns branch + change summary + verification |
-| reviewer | `agent/subagents/reviewer/` | Subagent | Task-mode independent review on a different vendor: `checkout_branch`, read the real diff, judge each acceptance criterion; returns approve/request_changes/reject |
-| researcher | `agent/subagents/researcher/` | Subagent | Fresh-context web research for facts the repo and tracker don't hold; returns cited findings + gaps |
+| classifier | `agent/subagents/classifier/` + `agent/tools/run_classifier.ts` | Subagent | Fast-model triage, called through its workflow-tool wrapper; returns type/priority/complexity/area/actionable/needs_clarification |
+| analyst | `agent/subagents/analyst/` + `agent/tools/run_analyst.ts` | Subagent | Planning against its own repo checkout, called through its workflow-tool wrapper; returns problem statement, approach, plan, risks, acceptance criteria, test strategy |
+| implementer | `agent/subagents/implementer/` + `agent/tools/run_implementer.ts` | Subagent | Implementation in its own checkout, called through its workflow-tool wrapper: branch, code, run the repo's checks, commit, `push_branch`; returns branch + change summary + verification |
+| reviewer | `agent/subagents/reviewer/` + `agent/tools/run_reviewer.ts` | Subagent | Independent review on a different vendor, called through its workflow-tool wrapper: `checkout_branch`, read the real diff, judge each acceptance criterion; returns approve/request_changes/reject |
+| researcher | `agent/subagents/researcher/` + `agent/tools/run_researcher.ts` | Subagent | Fresh-context web research for facts the repo and tracker don't hold, called through its workflow-tool wrapper; returns cited findings + gaps |
 | Linear access | `agent/connections/linear.ts` | Connection (MCP) | Create issues, comment, cross-reference; app-scoped auth via `linearAuth`; denied on unattended runs |
 | User preferences | `agent/tools/{get,save,clear}_user_preferences.ts` + `agent/lib/user-preferences.ts` | Tools | Per-user standing preferences in Blob, keyed to the resolved principal (never model input) |
 | Factory brain | `agent/tools/{read,update}_factory_brain.ts` + `agent/lib/factory-brain.ts` | Tools | Shared, durable notes about the target repository in Blob, keyed to `FACTORY_REPO` (never model input); reads open to every run, writes gated by `factoryBrainPolicy` (trusted-write) |
@@ -85,7 +91,7 @@ evals/                      # eve eval runner suite: smoke, routing/, safety/, p
 | Skills | `agent/skills/` | Skill | Load-on-demand procedures: `writing-quality`, `triaging-issues`, `github-linear-bridging` |
 | Evals | `evals/` | Evals | eve eval runner: routing and safety assertions (deny-by-default over the write-tool list), an opt-in full-pipeline run |
 
-Channels and the connection are I/O boundaries. Tools run in the app runtime (full `process.env`); the station git tools run their commands inside the station's sandbox. Skills only add instructions to context. Every station runs in **task mode** (its `agent.ts` declares an `outputSchema`), which means it returns structured output and can not request approvals or input; that is a design constraint, not an accident (see Security considerations).
+Channels and the connection are I/O boundaries. Tools run in the app runtime (full `process.env`); the station git tools run their commands inside the station's sandbox. Skills only add instructions to context. Every station sets `tool: false` and is called through its `run_<id>` workflow tool, which blocks on `ctx.agent(id, { message, outputSchema })`, so the orchestrator still gets structured output back from a single call; nothing in a station's own tool surface may need approval, since nobody is watching that station's card (see Security considerations).
 
 ## Data flow
 
@@ -101,7 +107,7 @@ Channels and the connection are I/O boundaries. Tools run in the app runtime (fu
 - **GitHub** (external): the repository and issue tracker the factory works on. Tool access goes through `@github-tools/eve-extension` with credentials brokered by Vercel Connect; git access in station sandboxes authenticates at the sandbox firewall (see Security).
 - **Linear** (external): where delegated work arrives and cross-references land. Access via Linear's MCP server with app-scoped Connect auth (scopes `read`, `write`, `issues:create`, `comments:create`).
 - **Vercel Blob**: per-user preferences under the reserved `user-preferences/<hashed-principal>.md` prefix, reachable only through the principal-scoped preference tools; the shared factory brain under the reserved `factory-brain/<hashed-repo>.md` prefix, reachable only through the factory-brain tools; and handoff artifacts under the reserved `artifacts/<validated-id>.md` prefix, reachable only through the artifact tools. Authenticated by the project's OIDC token.
-- **Vercel Sandbox**: the root sandbox holds the channel's thread checkout; each repo-facing station's sandbox holds its own clone of `FACTORY_REPO` (cloned once per template build via `factoryBootstrap`, moved to the current default branch per session via `factoryOnSession`). Not durable application stores.
+- **Vercel Sandbox**: the root sandbox holds the channel's thread checkout; each repo-facing station's sandbox holds its own clone of `FACTORY_REPO`, cloned fresh per session by `factoryInit` (eve's build-time snapshot `prepare()` sandbox has no `setNetworkPolicy`, so the credentialed clone can't be shared across sessions via the template anymore). Not durable application stores.
 
 There is no application database. Anything that must outlive a session (for example, cross-run sweep state for a future schedule) belongs in an external store.
 
@@ -113,21 +119,21 @@ There is no application database. Anything that must outlive a session (for exam
 | Linear (channel + MCP) | Agent Sessions in; issue creation, comments, cross-references out | eve Linear channel via Connect; MCP connection to `mcp.linear.app` with app-scoped auth shared through `linearAuth` (`LINEAR_CONNECTOR`) |
 | Vercel Blob | Per-user preference storage, the shared factory brain, and station handoff artifacts | `@vercel/blob`, OIDC-authenticated |
 | Vercel AI Gateway | Model access for the root and every station | Gateway model ids; the root model in `agent/agent.ts`, per-station models in each station's `agent.ts` (the reviewer deliberately runs a different vendor) |
-| Vercel Sandbox | Isolated runtimes: root checkout + three station clones | `agent/sandbox.ts` and `agent/subagents/*/sandbox.ts` (`vercel()` backend, shared builders in `agent/lib/github/repo-sandbox.ts`) |
+| Vercel Sandbox | Isolated runtimes: root checkout + three station clones | `agent/sandbox.ts` and `agent/subagents/*/sandbox.ts` (`VercelSandbox.environment()`, shared builders in `agent/lib/github/repo-sandbox.ts`) |
 
 ## Deployment & infrastructure
 
 - **Platform:** Vercel. Deploy with `eve deploy` (wraps `vercel deploy --prod`; the raw command cannot auto-detect the eve framework).
 - **Connectors:** provisioned via `vercel connect create` + `attach`; the GitHub trigger points at `/eve/v1/github` (subscribe to `issues`, `issue_comment`, `pull_request_review_comment`, `pull_request`, and `check_suite`) and the Linear trigger at `/eve/v1/linear` (AgentSessionEvent). The GitHub App installation needs write access to contents, issues, and pull requests on `FACTORY_REPO`.
-- **Environment:** connector UIDs `GITHUB_CONNECTOR` and `LINEAR_CONNECTOR`; `FACTORY_REPO` (required at module load; a missing value fails discovery); optional `FACTORY_SETUP_COMMAND` (runs inside the clone at template build). The model and Blob authenticate via the project's OIDC token.
-- **Local development:** `pnpm dev` runs the same runtime in a TUI; `vercel env pull` supplies a short-lived OIDC token (needed for Connect and the station sandboxes). The webhook surfaces run against a deployment. The dev principal is untrusted by design, so approval cards surface in the TUI.
+- **Environment:** connector UIDs `GITHUB_CONNECTOR` and `LINEAR_CONNECTOR`; `FACTORY_REPO` (required at module load; a missing value fails discovery); optional `FACTORY_SETUP_COMMAND` (runs inside the clone once per station session). The model and Blob authenticate via the project's OIDC token.
+- **Local development:** `pnpm dev` runs the same runtime in a TUI; `vercel env pull` supplies a short-lived OIDC token (needed for Connect and the station sandboxes). The webhook surfaces run against a deployment; point the TUI at one with `eve remote connect --url <url>`. The dev principal is untrusted by design, so approval cards surface in the TUI.
 
 ## Security considerations
 
 - **Trust is decided at dispatch, not in the prompt.** The channel hooks decide who the caller is on the signed webhook and stamp it into session auth (`attributes.trusted`, or the constructed autonomous principal). `agent/lib/trust.ts` is the single authority reading those stamps; a new capability never invents its own caller check.
 - **Approval predicates are the authorization policy.** `agent/lib/github/approval.ts` returns `not-applicable` (run), `user-approval` (stop and wait for a person), or `denied` per caller class. Unattended runs are denied rather than left waiting: nobody is watching to answer, and a server-side denial costs one step instead of a stranded session. `updateIssue` with `state` set follows the same close/reopen policy as `closeIssue`, so the two paths to the same action always behave alike.
 - **Draft PRs are the unattended ceiling.** `createPullRequest` with `draft: true` runs for every caller because a draft can't merge; anything that can ship (non-draft PRs, marking ready) waits for a human and is denied unattended; closing or reopening an issue is reversible triage and runs ungated. Merge tools are excluded from the surface entirely.
-- **Stations run in task mode and therefore hold no approvable tools.** A task-mode child cannot stop to wait for approval, so nothing inside a station may need one. The implementer's `push_branch` is safe ungated because it is inert by construction: `validateBranch` refuses `main`/`master`, `refs/*`, `HEAD`, and anything outside a conservative character set (so shell metacharacters can't reach the command line), and a feature branch alone ships nothing.
+- **Stations hold no approvable tools.** A declared subagent can technically request input, but nothing is watching a station's own approval card, so nothing inside a station may need one; that is a design convention this codebase follows, not a framework guarantee. The implementer's `push_branch` is safe ungated because it is inert by construction: `validateBranch` refuses `main`/`master`, `refs/*`, `HEAD`, and anything outside a conservative character set (so shell metacharacters can't reach the command line), and a feature branch alone ships nothing.
 - **Git credentials never enter a sandbox.** Clones, fetches, and pushes target the literal `https://github.com/<FACTORY_REPO>.git` URL, never the model-writable `origin` remote, and the installation token is injected at the sandbox firewall as a header transform on egress to github.com (`brokerPolicy`), dropped again in a `finally`.
 - **Label intake can't be forged by reporters.** GitHub fires the `labeled` action even for labels attached at issue creation, which issue templates let unauthenticated reporters do, so the hook verifies the labeler's repository permission against the API before dispatching; anyone below triage is acknowledged without a session.
 - **Mention authorization:** `onComment` dispatches only for OWNER/MEMBER/COLLABORATOR commenters; everyone else's mentions never start a session. The PR-opened hook deliberately isn't association-gated (summarizing outside PRs is the feature) but its task is scoped to one summary comment, and the dispatched session carries no trusted stamp, so its writes wait for approval.
@@ -136,7 +142,7 @@ There is no application database. Anything that must outlive a session (for exam
 - **Inbound route auth** (`agent/channels/eve.ts`): `[localDevUser, vercelOidc()]` rejects public browser traffic; channel traffic is authenticated by each connector.
 - **Per-user isolation:** the preference tools derive their Blob key from the resolved principal, never from model input; files live under the reserved `user-preferences/` prefix. `clear_user_preferences` is approval-gated (`always()`).
 - **Shared-brain integrity:** the factory-brain tools derive their Blob key from `FACTORY_REPO`, never from model input, so a session can't redirect a read or write to another object. Reads are open, but `update_factory_brain` is gated by `factoryBrainPolicy`: unattended runs are denied so an untrusted issue body can't write into the context every future run reads, trusted callers write directly, and the dev TUI waits on an approval card.
-- **Artifact-id containment:** artifact ids are the one Blob address the model supplies, so `artifactKey` accepts only ids matching the anchored `ARTIFACT_ID_PATTERN` (lowercase alphanumerics and hyphens, no dots or slashes) before interpolating them into a key under the reserved `artifacts/` prefix; an invalid id reads as `found: false`, indistinguishable from a missing one. Saves never overwrite (`allowOverwrite: false`), are size-bounded, and mint their own suffixed id, which is what lets both artifact tools live ungated inside task-mode stations.
+- **Artifact-id containment:** artifact ids are the one Blob address the model supplies, so `artifactKey` accepts only ids matching the anchored `ARTIFACT_ID_PATTERN` (lowercase alphanumerics and hyphens, no dots or slashes) before interpolating them into a key under the reserved `artifacts/` prefix; an invalid id reads as `found: false`, indistinguishable from a missing one. Saves never overwrite (`allowOverwrite: false`), are size-bounded, and mint their own suffixed id, which is what lets both artifact tools live ungated inside a station.
 
 ## Development & testing
 
@@ -163,8 +169,8 @@ There is no application database. Anything that must outlive a session (for exam
 - **Extension:** a prebuilt eve package mounted at `agent/extensions/<ns>.ts`; its tools appear as `<ns>__<tool>`. Here: `github` (`@github-tools/eve-extension`).
 - **Tool:** a typed action authored with `defineTool`, run in the app runtime. Station tools run their commands in the station's sandbox.
 - **Skill:** a load-on-demand Markdown procedure; the packaged form requires `description` frontmatter used for routing.
-- **Subagent / station:** a declared agent under `agent/subagents/<id>/` the root delegates to as a tool. It runs in a fresh child session and inherits nothing from the root (no instructions, tools, connections, or sandbox), so the caller passes everything in `message`. An `outputSchema` on its `agent.ts` makes every call task mode: structured output, and no stopping to wait for input.
-- **Task mode:** a child session that must run to completion and return structured output; it cannot ask questions or wait on approval.
+- **Subagent / station:** a declared agent under `agent/subagents/<id>/` with `tool: false`, so the model calls it only through its `run_<id>` workflow-tool wrapper in `agent/tools/`. It runs in a fresh child session and inherits nothing from the root (no instructions, tools, connections, or sandbox), so the caller passes everything in `message`. The wrapper attaches an `outputSchema` per call via `ctx.agent(id, { message, outputSchema })`, blocking until the station answers with structured output.
+- **Workflow tool:** a static tool (`defineWorkflowTool`) whose executor runs as a durable Workflow, giving it `ctx.agent()` to delegate to a subagent with a per-call `outputSchema`, `ctx.ask()` to request human input, and durable waits. Each station's `run_<id>` wrapper is one.
 - **Autonomous principal:** the constructed identity (`github:foreman-factory`) unattended label-intake runs execute under, carrying the intake issue number as an auth attribute; approval policies deny it everything except labels, comments on that one issue, closing or reopening issues, and draft PRs.
 - **Vercel Connect:** brokers OAuth/credentials for GitHub and Linear; connectors are identified by a UID.
 - **OIDC:** the project's Vercel identity token, used to authenticate Blob (and AI Gateway) without static keys.

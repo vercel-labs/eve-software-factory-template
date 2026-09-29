@@ -8,3 +8,4 @@ minimumReleaseAgeExclude:
   - ai
   - eve
   - workflow
+  - ultracite@7.12.1

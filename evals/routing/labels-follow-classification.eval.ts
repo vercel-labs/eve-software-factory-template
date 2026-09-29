@@ -38,7 +38,7 @@ export default defineEval({
     "Classifying a GitHub issue mirrors the result onto it as labels: the repo's vocabulary is read before any label write, and a label write (addLabels or updateIssue) is among the approvals the untrusted eval principal parks on; a progress comment may park alongside it. Needs at least one open issue (#1) on FACTORY_REPO.",
   tags: ["fast", "needs-connect"],
   async test(t) {
-    await t.send(
+    const turn = await t.send(
       "Run issue #1 on the repository through the classifier and mirror the classification onto the issue, then stop; do not run the analyst or any later station."
     );
     t.calledSubagent("classifier");
@@ -46,7 +46,9 @@ export default defineEval({
     t.calledSubagent("implementer", { count: 0 });
     t.parked();
     t.check(
-      t.pendingInputRequests.map((request) => request.action.toolName),
+      turn.session.pendingInputRequests.map(
+        (request) => request.action.toolName
+      ),
       satisfies(
         (names: readonly string[]) =>
           names.some((name) => LABEL_WRITES.has(name)),
