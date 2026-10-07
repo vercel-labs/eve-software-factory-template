@@ -1,7 +1,7 @@
 // Structured-output JSON Schemas for the five stations, shared between each
 // station's agent.ts (which needs none of this, now that outputSchema lives
 // per-call) and its model-facing workflow-tool wrapper in agent/tools/,
-// which passes one of these to ctx.agent(name, { message, outputSchema }).
+// which passes one of these to ctx.agent(name).send(message, { outputSchema }).
 // `as const` keeps the literal shape so the wrapper's return type is typed
 // from the schema instead of widening to plain JSON.
 
