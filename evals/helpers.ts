@@ -59,7 +59,7 @@ export const STATIONS = [
 
 /**
  * Returns the order in which subagents were first delegated to during a run,
- * extracted from `subagent.called` stream events.
+ * extracted from `agent.started` stream events.
  *
  * @remarks
  * Station delegations are subagent calls, not tool calls, so ordering
@@ -70,12 +70,11 @@ export function subagentCallOrder(
 ): string[] {
   const order: string[] = [];
   for (const event of events) {
-    if (event.type !== "subagent.called") {
+    if (event.type !== "agent.started") {
       continue;
     }
-    const { name } = event.data as { name?: unknown };
-    if (typeof name === "string" && !order.includes(name)) {
-      order.push(name);
+    if (!order.includes(event.data.name)) {
+      order.push(event.data.name);
     }
   }
   return order;

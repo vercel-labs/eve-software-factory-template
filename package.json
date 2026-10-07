@@ -20,11 +20,11 @@
     "validate": "pnpm run check && pnpm run typecheck && eve info"
   },
   "dependencies": {
-    "@github-tools/eve-extension": "^0.8.0",
+    "@github-tools/eve-extension": "^0.8.1",
     "@vercel/blob": "^2.8.0",
     "@vercel/connect": "^2.3.3",
-    "ai": "^7.0.120",
-    "eve": "^0.67.2",
+    "ai": "^7.0.131",
+    "eve": "^0.73.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
