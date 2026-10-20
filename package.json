@@ -23,8 +23,8 @@
     "@github-tools/eve-extension": "^0.8.1",
     "@vercel/blob": "^2.8.0",
     "@vercel/connect": "^2.3.3",
-    "ai": "^7.0.131",
-    "eve": "^0.73.0",
+    "ai": "^7.0.147",
+    "eve": "^0.81.1",
     "zod": "4.6.5"
   },
   "devDependencies": {
