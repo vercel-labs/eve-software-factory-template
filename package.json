@@ -24,7 +24,7 @@
     "@vercel/blob": "^2.8.0",
     "@vercel/connect": "^2.3.3",
     "ai": "^7.0.147",
-    "eve": "^0.81.1",
+    "eve": "^0.83.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
