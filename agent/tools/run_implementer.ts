@@ -20,10 +20,15 @@ export default defineWorkflowTool({
     "findings.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("implementer", {
-      message,
+    const response = await ctx.agent("implementer").send(message, {
       outputSchema: IMPLEMENTER_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    const result = await response.result();
+    if (result.status !== "completed" || result.data === undefined) {
+      throw new Error("The implementer did not return structured output.");
+    }
+    return result.data;
   },
   inputSchema: z.object({
     message: z

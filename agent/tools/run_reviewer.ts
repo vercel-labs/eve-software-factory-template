@@ -19,10 +19,15 @@ export default defineWorkflowTool({
     "the analyst saved its full detail as one.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("reviewer", {
-      message,
+    const response = await ctx.agent("reviewer").send(message, {
       outputSchema: REVIEWER_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    const result = await response.result();
+    if (result.status !== "completed" || result.data === undefined) {
+      throw new Error("The reviewer did not return structured output.");
+    }
+    return result.data;
   },
   inputSchema: z.object({
     message: z

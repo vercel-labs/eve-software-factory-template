@@ -18,10 +18,15 @@ export default defineWorkflowTool({
     "passes the question and any known context in the message.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("researcher", {
-      message,
+    const response = await ctx.agent("researcher").send(message, {
       outputSchema: RESEARCHER_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    const result = await response.result();
+    if (result.status !== "completed" || result.data === undefined) {
+      throw new Error("The researcher did not return structured output.");
+    }
+    return result.data;
   },
   inputSchema: z.object({
     message: z

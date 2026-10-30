@@ -19,10 +19,15 @@ export default defineWorkflowTool({
     "save its own deep supporting detail as an analysis artifact and return the id.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("analyst", {
-      message,
+    const response = await ctx.agent("analyst").send(message, {
       outputSchema: ANALYST_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    const result = await response.result();
+    if (result.status !== "completed" || result.data === undefined) {
+      throw new Error("The analyst did not return structured output.");
+    }
+    return result.data;
   },
   inputSchema: z.object({
     message: z

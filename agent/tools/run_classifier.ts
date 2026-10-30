@@ -17,10 +17,15 @@ export default defineWorkflowTool({
     "the work item verbatim in the message.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("classifier", {
-      message,
+    const response = await ctx.agent("classifier").send(message, {
       outputSchema: CLASSIFIER_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    const result = await response.result();
+    if (result.status !== "completed" || result.data === undefined) {
+      throw new Error("The classifier did not return structured output.");
+    }
+    return result.data;
   },
   inputSchema: z.object({
     message: z
