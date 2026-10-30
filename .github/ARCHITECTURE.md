@@ -40,8 +40,8 @@ agent/
     agent.ts                # disableTool(): the built-in agent tool would let the root bypass its stations
     run_classifier.ts, run_researcher.ts, run_analyst.ts, run_implementer.ts, run_reviewer.ts
                              # defineWorkflowTool wrappers: the model-facing entry point for each station, since
-                             # defineAgent no longer carries an outputSchema. Each blocks on ctx.agent(id, { message,
-                             # outputSchema }), attaching the matching schema from lib/stations/schemas.ts.
+                             # defineAgent no longer carries an outputSchema. Each calls ctx.agent(id).send(message, {
+                             # outputSchema, signal }), then awaits response.result() for the matching structured result.
     get_user_preferences.ts   # Blob: load this user's saved preferences
     save_user_preferences.ts  # Blob: save standing preferences (principal-scoped)
     clear_user_preferences.ts # Blob: clear this user's preferences (approval-gated)
@@ -91,7 +91,7 @@ evals/                      # eve eval runner suite: smoke, routing/, safety/, p
 | Skills | `agent/skills/` | Skill | Load-on-demand procedures: `writing-quality`, `triaging-issues`, `github-linear-bridging` |
 | Evals | `evals/` | Evals | eve eval runner: routing and safety assertions (deny-by-default over the write-tool list), an opt-in full-pipeline run |
 
-Channels and the connection are I/O boundaries. Tools run in the app runtime (full `process.env`); the station git tools run their commands inside the station's sandbox. Skills only add instructions to context. Every station sets `tool: false` and is called through its `run_<id>` workflow tool, which blocks on `ctx.agent(id, { message, outputSchema })`, so the orchestrator still gets structured output back from a single call; nothing in a station's own tool surface may need approval, since nobody is watching that station's card (see Security considerations).
+Channels and the connection are I/O boundaries. Tools run in the app runtime (full `process.env`); the station git tools run their commands inside the station's sandbox. Skills only add instructions to context. Every station sets `tool: false` and is called through its `run_<id>` workflow tool, which sends to `ctx.agent(id).send(message, { outputSchema, signal })` and blocks on `response.result()`, so the orchestrator still gets structured output back from a single call; nothing in a station's own tool surface may need approval, since nobody is watching that station's card (see Security considerations).
 
 ## Data flow
 
@@ -169,7 +169,7 @@ There is no application database. Anything that must outlive a session (for exam
 - **Extension:** a prebuilt eve package mounted at `agent/extensions/<ns>.ts`; its tools appear as `<ns>__<tool>`. Here: `github` (`@github-tools/eve-extension`).
 - **Tool:** a typed action authored with `defineTool`, run in the app runtime. Station tools run their commands in the station's sandbox.
 - **Skill:** a load-on-demand Markdown procedure; the packaged form requires `description` frontmatter used for routing.
-- **Subagent / station:** a declared agent under `agent/subagents/<id>/` with `tool: false`, so the model calls it only through its `run_<id>` workflow-tool wrapper in `agent/tools/`. It runs in a fresh child session and inherits nothing from the root (no instructions, tools, connections, or sandbox), so the caller passes everything in `message`. The wrapper attaches an `outputSchema` per call via `ctx.agent(id, { message, outputSchema })`, blocking until the station answers with structured output.
+- **Subagent / station:** a declared agent under `agent/subagents/<id>/` with `tool: false`, so the model calls it only through its `run_<id>` workflow-tool wrapper in `agent/tools/`. It runs in a fresh child session and inherits nothing from the root (no instructions, tools, connections, or sandbox), so the caller passes everything in `message`. The wrapper attaches an `outputSchema` to `ctx.agent(id).send(message, { outputSchema, signal })`, then awaits `response.result()` until the station answers with structured output.
 - **Workflow tool:** a static tool (`defineWorkflowTool`) whose executor runs as a durable Workflow, giving it `ctx.agent()` to delegate to a subagent with a per-call `outputSchema`, `ctx.ask()` to request human input, and durable waits. Each station's `run_<id>` wrapper is one.
 - **Autonomous principal:** the constructed identity (`github:foreman-factory`) unattended label-intake runs execute under, carrying the intake issue number as an auth attribute; approval policies deny it everything except labels, comments on that one issue, closing or reopening issues, and draft PRs.
 - **Vercel Connect:** brokers OAuth/credentials for GitHub and Linear; connectors are identified by a UID.
