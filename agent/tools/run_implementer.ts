@@ -6,7 +6,7 @@ import { IMPLEMENTER_OUTPUT_SCHEMA } from "../lib/stations/schemas.js";
  * Blocking wrapper the orchestrator calls to run the `implementer` station.
  *
  * @remarks
- * - `defineAgent` has no `outputSchema` anymore; `ctx.agent()` takes one per call.
+ * - `defineAgent` has no `outputSchema` anymore; `ctx.agent().send()` takes one per message.
  * - Named `run_implementer`, not `implementer`: the compiler rejects a tool and a local subagent with the same public name.
  */
 export default defineWorkflowTool({
@@ -20,10 +20,21 @@ export default defineWorkflowTool({
     "findings.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("implementer", {
-      message,
+    const response = await ctx.agent("implementer").send(message, {
       outputSchema: IMPLEMENTER_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    const result = await response.result();
+    if (result.status === "failed") {
+      throw new Error(`The implementer failed: ${result.error.message}`);
+    }
+    if (result.status === "cancelled") {
+      throw new Error("The implementer was cancelled.");
+    }
+    if (result.data === undefined) {
+      throw new Error("The implementer completed without structured output.");
+    }
+    return result.data;
   },
   inputSchema: z.object({
     message: z

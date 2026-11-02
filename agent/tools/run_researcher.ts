@@ -6,7 +6,7 @@ import { RESEARCHER_OUTPUT_SCHEMA } from "../lib/stations/schemas.js";
  * Blocking wrapper the orchestrator calls to run the `researcher` station.
  *
  * @remarks
- * - `defineAgent` has no `outputSchema` anymore; `ctx.agent()` takes one per call.
+ * - `defineAgent` has no `outputSchema` anymore; `ctx.agent().send()` takes one per message.
  * - Named `run_researcher`, not `researcher`: the compiler rejects a tool and a local subagent with the same public name.
  */
 export default defineWorkflowTool({
@@ -18,10 +18,21 @@ export default defineWorkflowTool({
     "passes the question and any known context in the message.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("researcher", {
-      message,
+    const response = await ctx.agent("researcher").send(message, {
       outputSchema: RESEARCHER_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    const result = await response.result();
+    if (result.status === "failed") {
+      throw new Error(`The researcher failed: ${result.error.message}`);
+    }
+    if (result.status === "cancelled") {
+      throw new Error("The researcher was cancelled.");
+    }
+    if (result.data === undefined) {
+      throw new Error("The researcher completed without structured output.");
+    }
+    return result.data;
   },
   inputSchema: z.object({
     message: z

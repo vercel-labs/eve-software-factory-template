@@ -1,9 +1,11 @@
 // Structured-output JSON Schemas for the five stations, shared between each
 // station's agent.ts (which needs none of this, now that outputSchema lives
-// per-call) and its model-facing workflow-tool wrapper in agent/tools/,
-// which passes one of these to ctx.agent(name, { message, outputSchema }).
-// `as const` keeps the literal shape so the wrapper's return type is typed
-// from the schema instead of widening to plain JSON.
+// per-message) and its model-facing workflow-tool wrapper in agent/tools/.
+// Each wrapper passes one of these to ctx.agent(name).send(message, { outputSchema })
+// and then awaits response.result(). `as const` preserves the JSON Schema
+// literal for that runtime request; JSON Schema literals do not infer the
+// TypeScript type of result.data, which remains unknown unless send receives
+// an explicit generic or a Standard Schema such as Zod.
 
 export const CLASSIFIER_OUTPUT_SCHEMA = {
   additionalProperties: false,
