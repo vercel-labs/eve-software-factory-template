@@ -28,25 +28,35 @@ export const REPO_DIR = "/workspace/repo";
 export const REMOTE_URL = `https://github.com/${FACTORY_REPO}.git`;
 
 /**
- * Returns the refusal reason, or null when the branch name may be used in a
- * git command.
+ * Returns the refusal reason, or null when the name is a plain branch name
+ * that is safe to interpolate into a git command.
  *
  * @remarks
- * `refs/heads/main` and `HEAD` would reach a protected branch under another
- * name, so only plain branch names are accepted, and the protected branches
- * themselves are refused outright: the factory delivers pull requests, never
- * direct pushes to the default branch.
+ * This is the shape check alone, for commands that only read (fetch, pull,
+ * ls-remote), where naming the default branch is legitimate. `refs/heads/x`
+ * and `HEAD` are refused so a ref can't be reached under another name.
+ */
+export function validateRef(ref: string): string | null {
+  if (!BRANCH_PATTERN.test(ref) || ref.includes("..") || ref.includes("//")) {
+    return `"${ref}" is not a valid branch name.`;
+  }
+  if (ref.startsWith("refs/") || ref === "HEAD") {
+    return `"${ref}" is not a plain branch name. Pass the branch name without a refs/ prefix.`;
+  }
+  return null;
+}
+
+/**
+ * Returns the refusal reason, or null when the branch may be pushed.
+ *
+ * @remarks
+ * {@link validateRef} plus the protected-branch rule: the factory delivers
+ * pull requests, never direct pushes to the default branch.
  */
 export function validateBranch(branch: string): string | null {
-  if (
-    !BRANCH_PATTERN.test(branch) ||
-    branch.includes("..") ||
-    branch.includes("//")
-  ) {
-    return `"${branch}" is not a valid branch name.`;
-  }
-  if (branch.startsWith("refs/") || branch === "HEAD") {
-    return `"${branch}" is not a plain branch name. Pass the branch name without a refs/ prefix.`;
+  const refusal = validateRef(branch);
+  if (refusal) {
+    return refusal;
   }
   if (PROTECTED_BRANCHES.has(branch)) {
     return `Direct pushes to ${branch} are not allowed. Push a feature branch and open a pull request.`;

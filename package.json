@@ -13,25 +13,28 @@
     "build": "eve build",
     "check": "ultracite check",
     "dev": "eve dev",
+    "discovery": "node scripts/check-discovery.ts",
     "eval": "eve eval",
     "fix": "ultracite fix",
     "start": "eve start",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc",
-    "validate": "pnpm run check && pnpm run typecheck && eve info"
+    "validate": "pnpm run check && pnpm run typecheck && pnpm run test && pnpm run discovery"
   },
   "dependencies": {
-    "@github-tools/eve-extension": "^0.8.0",
-    "@vercel/blob": "^2.8.0",
-    "@vercel/connect": "^2.3.3",
-    "ai": "^7.0.120",
-    "eve": "^0.67.2",
-    "zod": "4.6.5"
+    "@vercel/blob": "^2.9.0",
+    "@vercel/connect": "^2.9.1",
+    "ai": "^7.0.166",
+    "eve": "^1.0.0-rc.8",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
     "@types/node": "~24.19.0",
     "typescript": "7.0.2",
-    "ultracite": "^7.12.1"
+    "ultracite": "^7.12.1",
+    "vitest": "^5.1.0"
   },
   "engines": {
     "node": "24.x"

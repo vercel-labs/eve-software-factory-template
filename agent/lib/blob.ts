@@ -9,8 +9,13 @@ import { BlobNotFoundError, del, get, head, put } from "@vercel/blob";
  * rather than a per-feature one. This module owns that layout: the reserved prefixes, what each
  * holds, and which tool owns it. Any general-purpose Blob tool added later must consult
  * {@link reservedNamespaceForPath} / {@link reservedNamespaceForUrl} before acting, so a managed
- * document (the factory brain, a user's preferences, a handoff artifact) can't be reached or
- * overwritten through a generic file operation.
+ * document (a handoff artifact, eve's memory documents) can't be reached or overwritten through a
+ * generic file operation.
+ *
+ * Memory no longer goes through this module: user preferences and the factory brain are eve
+ * memory slots (`agent/memory/`), which eve stores through its own file-memory backend. The
+ * prefixes those documents used before stay reserved here, so whatever an older deployment left
+ * behind is still out of reach of a generic tool.
  *
  * Feature modules import their prefix from here rather than declaring their own. The dependency
  * points toward storage on purpose: adding a namespace is a single edit in this file, and the
@@ -22,11 +27,17 @@ import { BlobNotFoundError, del, get, head, put } from "@vercel/blob";
  * credentials.
  */
 
-/** Blob path prefix holding per-user preference files. */
-export const USER_PREFERENCES_PREFIX = "user-preferences/";
+/**
+ * Blob path prefix eve's file memory writes under when it shares the application's store
+ * (`BLOB_STORE_ID` / `BLOB_READ_WRITE_TOKEN` instead of the dedicated `EVE_MEMORY_BLOB` store).
+ */
+export const EVE_MEMORY_PREFIX = "eve/memory/";
 
-/** Blob path prefix holding the shared factory brain. */
-export const FACTORY_BRAIN_PREFIX = "factory-brain/";
+/** Legacy prefix: per-user preference files written before preferences became a memory slot. */
+export const LEGACY_USER_PREFERENCES_PREFIX = "user-preferences/";
+
+/** Legacy prefix: the factory brain written before it became a memory slot. */
+export const LEGACY_FACTORY_BRAIN_PREFIX = "factory-brain/";
 
 /** Blob path prefix holding handoff artifacts passed between stations. */
 export const ARTIFACTS_PREFIX = "artifacts/";
@@ -41,9 +52,9 @@ export const ARTIFACTS_PREFIX = "artifacts/";
 interface ReservedNamespace {
   /** Human-readable description of what the namespace holds. */
   readonly label: string;
-  /** Tool that reads this namespace. */
+  /** What reads this namespace: a tool name, or a phrase naming the mechanism. */
   readonly readTool: string;
-  /** Tool that owns writes to this namespace. */
+  /** What owns writes to this namespace: a tool name, or a phrase naming the mechanism. */
   readonly writeTool: string;
 }
 
@@ -60,15 +71,21 @@ const RESERVED_NAMESPACES: Readonly<Record<string, ReservedNamespace>> = {
     readTool: "read_artifact",
     writeTool: "save_artifact",
   },
-  [FACTORY_BRAIN_PREFIX]: {
-    label: "the shared factory brain",
-    readTool: "read_factory_brain",
-    writeTool: "update_factory_brain",
+  [EVE_MEMORY_PREFIX]: {
+    label: "the agent's memory documents",
+    readTool: "your recalled memory",
+    writeTool:
+      "the save_memory and remove_memory tools of the matching memory slot",
   },
-  [USER_PREFERENCES_PREFIX]: {
-    label: "user preferences",
-    readTool: "get_user_preferences",
-    writeTool: "save_user_preferences",
+  [LEGACY_FACTORY_BRAIN_PREFIX]: {
+    label: "the factory brain from an earlier version",
+    readTool: "your recalled memory",
+    writeTool: "brain__save_memory",
+  },
+  [LEGACY_USER_PREFERENCES_PREFIX]: {
+    label: "user preferences from an earlier version",
+    readTool: "your recalled memory",
+    writeTool: "preferences__save_memory",
   },
 };
 

@@ -9,6 +9,9 @@ The factory's target repository is checked out at `/workspace/repo`. Use it:
 - Read the actual files before naming them in `affected_surface`. A plan that names files that don't exist wastes an implementation cycle.
 - Discover the repository's own conventions and record what the implementer needs: the package manager, the lint/typecheck/test commands (from package.json, CI config, or a contributing guide), the code style in the surrounding files.
 - Trace the code path the work item touches instead of reasoning from the file names alone.
+- The checkout is on the default branch as of the start of your run. To look at another branch, fetch it with the `git` tool (`["fetch","origin","<branch>"]`) and check it out in the shell.
+- The read-only `gh` tool reaches what the checkout doesn't hold: the issue's discussion (`["issue","view","12","--comments"]`), related pull requests (`["pr","list","--search","..."]`), a past change (`["pr","diff","34"]`).
+- Notes labeled as the factory brain may appear at the start of your context: facts earlier runs verified about this repository. Build on them, and trust the repository over the note when they disagree.
 - Do not modify anything. You plan; the implementer changes files.
 
 ## Produce

@@ -249,7 +249,7 @@ export const IMPLEMENTER_OUTPUT_SCHEMA = {
     },
     pushed: {
       description:
-        "Whether push_branch succeeded; when false, the failure reason is in known_limitations.",
+        "Whether the branch was pushed; when false, the failure reason is in known_limitations.",
       type: "boolean",
     },
     verification: {

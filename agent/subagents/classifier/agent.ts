@@ -2,9 +2,15 @@ import { defineAgent } from "eve";
 import { MODELS } from "../../lib/models.js";
 
 /**
- * Station 1: triage.
+ * The clarification station.
  *
  * @remarks
+ * Routine triage is no longer an agent turn: `triage_work_item` classifies a
+ * work item with a decision model in one call. This station is what the
+ * orchestrator falls back to when that says the item needs clarification
+ * (a decision model can pick an option but cannot write the questions to
+ * ask), or when triage itself is unavailable.
+ *
  * Runs on a fast, cheap model because classification is a shaping step, not
  * an analysis step. The station receives only text (the work item plus any
  * thread context the orchestrator packs into `message`) and returns the

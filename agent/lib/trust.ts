@@ -2,7 +2,8 @@ import type { SessionAuthContext } from "eve/context";
 
 /**
  * Constructed principal for unattended factory runs (an issue labeled
- * `factory`).
+ * `factory`, a red CI run on a factory pull request, or a ticket submitted
+ * through the intake API).
  *
  * @remarks
  * Real GitHub actors project as numeric `github:<id>` principals, so this
@@ -72,6 +73,45 @@ export function stampAutonomous(
       ...auth.attributes,
       [INTAKE_ISSUE_ATTRIBUTE]: String(intakeIssue),
     },
+    principalId: AUTONOMOUS_PRINCIPAL,
+    principalType: "service",
+  };
+}
+
+/**
+ * Auth attribute carrying the intake API ticket an unattended run was
+ * dispatched for.
+ */
+export const INTAKE_TICKET_ATTRIBUTE = "intakeTicket";
+
+/**
+ * Auth attribute recording which verified API caller submitted the ticket.
+ * Informational only: no policy reads it.
+ */
+export const INTAKE_CALLER_ATTRIBUTE = "intakeCaller";
+
+/**
+ * Builds the unattended factory principal for a ticket submitted through the
+ * intake API.
+ *
+ * @remarks
+ * The principal is constructed from the verified caller and the server-made
+ * ticket id alone. Nothing in the request body reaches it, so a ticket can't
+ * choose who its run acts as. It carries no intake issue number, which means
+ * the approval policies give it no thread to comment on: an API run can read
+ * the repository, apply labels, and open a draft pull request, and nothing
+ * else.
+ */
+export function autonomousForTicket(
+  ticketId: string,
+  callerId: string
+): SessionAuthContext {
+  return {
+    attributes: {
+      [INTAKE_CALLER_ATTRIBUTE]: callerId,
+      [INTAKE_TICKET_ATTRIBUTE]: ticketId,
+    },
+    authenticator: "intake",
     principalId: AUTONOMOUS_PRINCIPAL,
     principalType: "service",
   };

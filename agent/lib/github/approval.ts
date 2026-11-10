@@ -1,3 +1,4 @@
+import type { SessionAuthContext } from "eve/context";
 import type { ApprovalContext, ApprovalStatus } from "eve/tools/approval";
 import {
   intakeIssueNumber,
@@ -5,28 +6,43 @@ import {
   isScheduleAppAuth,
   isTrusted,
 } from "../trust.js";
+import { type GhEffect, parseGh } from "./cli.js";
 
 /**
- * Baseline policy for reversible repository writes (comments, issue creation,
- * assignees, reviewer requests, stateless issue updates).
+ * The factory's authorization policy: what each class of caller may do on
+ * GitHub, and to the factory's shared memory.
  *
  * @remarks
- * Unattended factory runs are denied outright rather than parked: nobody is
- * watching an autonomous turn, so an approval card would strand the session
- * forever, and a denial resolves server-side in one step. Trusted callers
- * (stamped at dispatch) and schedule app turns run without a card because
- * these writes are reversible and low blast radius. Everyone else, the local
- * dev TUI included, parks on a card, which is also how the approval flow
- * stays demoable.
+ * Trust is decided once, at dispatch, by the channels (`agent/lib/trust.ts`).
+ * Every function here reads that stamp and returns one of three outcomes:
+ * `not-applicable` (run), `user-approval` (stop and wait for a person), or
+ * `denied`. There are three caller classes:
+ *
+ * - **Unattended** (the constructed autonomous principal: label intake, CI
+ *   fixes, API intake). Nobody is watching, so nothing ever waits for
+ *   approval; a call either runs or is denied.
+ * - **Trusted** (a channel stamped the caller, or a schedule turn). Routine,
+ *   reversible writes run without a prompt.
+ * - **Everyone else** (the dev TUI, an unstamped session). Writes wait for a
+ *   person.
+ *
+ * Shipping (anything that takes a pull request out of draft) waits for a
+ * person no matter who asks, and is denied outright when nobody is watching.
  */
-export function writePolicy(ctx: ApprovalContext): ApprovalStatus {
-  const auth = ctx.session.auth.current;
+
+type Auth = SessionAuthContext | null;
+
+const denied = (reason: string): ApprovalStatus => ({ reason, type: "denied" });
+
+/**
+ * Policy for routine, reversible repository writes: creating an issue,
+ * editing one, assigning people, commenting on a pull request.
+ */
+export function writeDecision(auth: Auth): ApprovalStatus {
   if (isAutonomous(auth)) {
-    return {
-      reason:
-        "Unattended factory runs may only apply labels, comment on their intake issue, and open draft pull requests.",
-      type: "denied",
-    };
+    return denied(
+      "Unattended factory runs may only apply labels, comment on the thread they were dispatched from, close or reopen issues, and open draft pull requests."
+    );
   }
   if (isTrusted(auth) || isScheduleAppAuth(auth)) {
     return "not-applicable";
@@ -35,141 +51,146 @@ export function writePolicy(ctx: ApprovalContext): ApprovalStatus {
 }
 
 /**
- * `addIssueComment`: an unattended run may narrate on the issue it was
- * dispatched from, and nowhere else.
- *
- * @remarks
- * A progress comment is as reversible and low blast radius as the label
- * writes {@link labelPolicy} already allows, so denying it bought no safety,
- * only a silent-until-done run. The scope is the containment: the intake
- * issue number is stamped into the session auth at dispatch (on the signed
- * webhook, never from model input), and only a comment targeting that number
- * runs, so instructions injected through the issue body cannot make the run
- * comment anywhere else in the repository. Attended callers follow
- * {@link writePolicy} unchanged.
+ * Policy for comments. An unattended run may comment on the one thread it
+ * was dispatched from (stamped at dispatch) and nowhere else, so a
+ * prompt-injected issue can't make it post across the repository.
  */
-export function commentPolicy(ctx: ApprovalContext): ApprovalStatus {
-  const auth = ctx.session.auth.current;
+export function commentDecision(
+  auth: Auth,
+  thread: number | null
+): ApprovalStatus {
   if (!isAutonomous(auth)) {
-    return writePolicy(ctx);
+    return writeDecision(auth);
   }
   const intakeIssue = intakeIssueNumber(auth);
-  const input = ctx.toolInput as { issueNumber?: unknown } | undefined;
-  if (intakeIssue !== null && input?.issueNumber === intakeIssue) {
+  if (intakeIssue !== null && thread === intakeIssue) {
     return "not-applicable";
   }
-  return {
-    reason: `Unattended factory runs may comment only on the issue they were dispatched from${
-      intakeIssue === null ? "" : ` (#${intakeIssue})`
-    }.`,
-    type: "denied",
-  };
+  return denied(
+    intakeIssue === null
+      ? "This unattended run has no thread to comment on. Put what you have to say in your final message instead."
+      : `Unattended factory runs may comment only on the thread they were dispatched from (#${intakeIssue}), addressed by its number.`
+  );
 }
 
 /**
- * The shared factory brain: durable notes about the target repository that
- * feed into every future run.
+ * Policy for label changes. Labels are how an unattended run mirrors its
+ * triage onto the work item, so they run for it; other callers follow the
+ * routine-write policy.
+ */
+export function labelDecision(auth: Auth): ApprovalStatus {
+  return isAutonomous(auth) ? "not-applicable" : writeDecision(auth);
+}
+
+/**
+ * The ship gate: anything that presents a pull request as ready. A person
+ * approves it every time, and an unattended run is denied, because a draft
+ * is the most the factory delivers on its own.
+ */
+export function shipDecision(auth: Auth): ApprovalStatus {
+  if (isAutonomous(auth)) {
+    return denied(
+      "Unattended factory runs stop at a draft pull request; a person marks it ready."
+    );
+  }
+  return "user-approval";
+}
+
+/**
+ * Maps the effect of a `gh` invocation and the caller's trust class to an
+ * approval outcome.
  *
  * @remarks
- * Reads are always allowed and never routed here; this policy gates writes
- * only. Because a brain entry becomes context for every later run, an
- * unattended run is denied writes rather than parked (nobody is watching, and
- * a labeled issue's body is untrusted input that must not be able to poison
- * the shared brain). Trusted callers and schedule turns write without a card;
- * every other human caller, the dev TUI included, parks on one.
+ * - Reads, closing or reopening an issue (reversible triage), and opening a
+ *   draft pull request (it cannot merge) run for every caller.
+ * - A close or reopen that also posts a comment is held to the comment
+ *   policy, so neither the approval a comment needs nor an unattended run's
+ *   comment scope can be sidestepped through `--comment`.
+ */
+export function ghEffectDecision(effect: GhEffect, auth: Auth): ApprovalStatus {
+  switch (effect.kind) {
+    case "read":
+    case "draft-pr":
+      return "not-applicable";
+    case "label":
+      return labelDecision(auth);
+    case "comment":
+      return commentDecision(auth, effect.thread);
+    case "state":
+      return effect.withComment
+        ? commentDecision(auth, effect.commentThread)
+        : "not-applicable";
+    case "write":
+      return writeDecision(auth);
+    case "ship":
+      return shipDecision(auth);
+    case "forbidden":
+      return denied(effect.reason);
+    default:
+      return effect satisfies never;
+  }
+}
+
+interface GhToolInput {
+  readonly args?: readonly string[];
+}
+
+/**
+ * Approval policy for the orchestrator's `gh` tool.
+ *
+ * @remarks
+ * An argv the allowlist refuses is denied here, with the reason, so the
+ * model learns what would work without the command ever reaching a sandbox.
+ */
+export function ghPolicy(ctx: ApprovalContext<GhToolInput>): ApprovalStatus {
+  const parsed = parseGh(ctx.toolInput?.args ?? []);
+  if (!parsed.ok) {
+    return denied(parsed.reason);
+  }
+  return ghEffectDecision(parsed.invocation.effect, ctx.session.auth.current);
+}
+
+/**
+ * Approval policy for a station's `gh` tool: reads run, everything else is
+ * denied.
+ *
+ * @remarks
+ * Stations never return `user-approval`. An unattended run has nobody to
+ * answer, and the orchestrator owns every write to GitHub anyway; a station
+ * that wants something changed reports it in its structured output.
+ */
+export function readOnlyGhPolicy(
+  ctx: ApprovalContext<GhToolInput>
+): ApprovalStatus {
+  const parsed = parseGh(ctx.toolInput?.args ?? []);
+  if (!parsed.ok) {
+    return denied(parsed.reason);
+  }
+  return parsed.invocation.effect.kind === "read"
+    ? "not-applicable"
+    : denied(
+        "Stations read GitHub and leave the writing to the orchestrator. Report what should change in your structured output."
+      );
+}
+
+/**
+ * Policy for writing the factory brain (the shared memory slot).
+ *
+ * @remarks
+ * The brain is context every future run trusts. Unattended runs work from
+ * untrusted issue bodies, so they never write it; they don't get the tools
+ * at all (`agent/lib/memory/brain.ts`), and this denial is the second lock.
+ * Trusted callers write directly; the dev TUI waits for approval.
  */
 export function factoryBrainPolicy(ctx: ApprovalContext): ApprovalStatus {
   const auth = ctx.session.auth.current;
   if (isAutonomous(auth)) {
-    return {
-      reason:
-        "Unattended factory runs may read the factory brain but not write to it.",
-      type: "denied",
-    };
+    return denied(
+      "Unattended factory runs may read the factory brain but not write to it."
+    );
   }
   if (isTrusted(auth) || isScheduleAppAuth(auth)) {
     return "not-applicable";
   }
   return "user-approval";
-}
-
-/**
- * Label writes: the one reversible write an unattended run also needs, so it
- * can mark the work item as picked up.
- */
-export function labelPolicy(ctx: ApprovalContext): ApprovalStatus {
-  return isAutonomous(ctx.session.auth.current)
-    ? "not-applicable"
-    : writePolicy(ctx);
-}
-
-/**
- * Policy for shipping work: marking a pull request ready for review.
- *
- * @remarks
- * This parks for every human caller, trusted or not; shipping is the factory's
- * human gate. Unattended runs are denied outright.
- */
-export function shipPolicy(ctx: ApprovalContext): ApprovalStatus {
-  if (isAutonomous(ctx.session.auth.current)) {
-    return {
-      reason:
-        "Unattended factory runs stop at a draft pull request; a person marks it ready.",
-      type: "denied",
-    };
-  }
-  return "user-approval";
-}
-
-/**
- * Closing and reopening issues: routine, reversible triage, so it runs for
- * every caller that can reach it, unattended runs included.
- *
- * @remarks
- * Closing a duplicate or stale issue is everyday triage, and a reopen undoes
- * it, so gating it as a ship action added friction without protecting much.
- * The only sessions that reach the issue-lifecycle tools are trusted mentions,
- * autonomous label runs, and the local dev TUI; an untrusted public commenter
- * never gets a session (see the channel's `onComment`), so allowing this can't
- * hand issue control to an arbitrary account. Unlike {@link commentPolicy}
- * this is deliberately not scoped to one issue, because deduplication closes
- * the duplicates, not the intake issue.
- */
-export function closeIssuePolicy(): ApprovalStatus {
-  return "not-applicable";
-}
-
-/**
- * `createPullRequest`: a draft runs for every caller, anything that can be
- * merged follows {@link shipPolicy}.
- *
- * @remarks
- * A draft cannot merge, so an unattended run can deliver its finished work
- * without a card while marking the PR ready stays a human act.
- */
-export function createPullRequestPolicy(ctx: ApprovalContext): ApprovalStatus {
-  const input = ctx.toolInput as { draft?: unknown } | undefined;
-  if (input?.draft === true) {
-    return "not-applicable";
-  }
-  return shipPolicy(ctx);
-}
-
-/**
- * `updateIssue`: setting `state` closes or reopens the issue, so those calls
- * follow {@link closeIssuePolicy}; stateless updates follow
- * {@link writePolicy}.
- *
- * @remarks
- * The split keeps the two paths honest: a close or reopen through
- * `updateIssue` is the same reversible triage as `closeIssue` and runs the
- * same way, while a stateless edit (title, body, labels) stays under the
- * baseline write policy.
- */
-export function updateIssuePolicy(ctx: ApprovalContext): ApprovalStatus {
-  const input = ctx.toolInput as { state?: unknown } | undefined;
-  if (input?.state !== undefined) {
-    return closeIssuePolicy();
-  }
-  return writePolicy(ctx);
 }
