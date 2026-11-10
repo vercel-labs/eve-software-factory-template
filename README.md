@@ -29,8 +29,8 @@ Each station is its own agent with its own instructions, sandbox, and tools. The
 - **Delegate in Linear.** Linear Agent Sessions run the same pipeline and report progress back in Linear.
 - **POST a ticket.** Any system that can send JSON can hand Foreman a task over HTTP and poll for the result. See [Submit work over HTTP](#submit-work-over-http).
 - **The dev TUI.** Hand it a task locally. Labels, comments, and other writes to GitHub wait for your approval.
-- **Red CI on a factory PR.** Foreman diagnoses the failure and, when the code is the cause, pushes a fix to its own branches, never yours. A flaky test or a broken runner gets a comment instead of a fix.
-- **Someone opens a pull request.** Foreman posts one orienting comment for reviewers: a summary, not a review.
+- **Red CI on a factory PR.** Foreman diagnoses the failure and, when the code is the cause, pushes a fix to its own branches, never yours. A flaky test or a broken runner gets a comment instead of a fix. When the failing checks' logs can't be read, Foreman says the cause is unknown and asks a person to look.
+- **Someone opens a pull request.** Foreman posts one orienting comment for reviewers: a summary, not a review. That run can read the pull request and comment on it, and nothing else: no labels, no stations, no branch.
 
 ## Deploy
 
@@ -41,9 +41,9 @@ The Vercel deploy flow sets up the basics: the **GitHub** connector, **Linear** 
 After the first deploy, finish the setup from the linked project (`vercel link`, as in [Local development](#local-development)):
 
 1. Run `eve integration setup file-memory`, then redeploy with `eve deploy`. This provisions the private Blob store that holds Foreman's memory (user preferences and the factory brain) and sets `EVE_MEMORY_BLOB_STORE_ID` for you.
-2. Check the GitHub App's permissions: read and write on contents, issues, and pull requests, plus read on Actions, Checks, and Commit statuses so Foreman can diagnose red CI.
+2. Check the GitHub App's permissions: read and write on contents, issues, and pull requests, plus read on Actions, Checks, and Commit statuses so Foreman can diagnose red CI. Each command asks for a token narrowed to what it needs, and by default a command fails when GitHub refuses that token; the error names the permissions to check (see `FACTORY_TOKEN_FALLBACK` below).
 3. Optional: set `FACTORY_INTAKE_TOKEN` to a random secret of at least 32 characters if you want to submit work over HTTP from outside Vercel.
-4. Recommended: protect your default branch on GitHub. Foreman's tools refuse pushes to `main` and `master`, and branch protection enforces the same rule on GitHub's side, whatever code runs in a sandbox.
+4. Protect your default branch on GitHub (branch protection or a ruleset that requires pull requests). This is required, not optional. Foreman's `git` tool pushes only to branches under `FACTORY_BRANCH_PREFIX` (default `factory/`) and refuses `main` and `master` whatever the prefix is, but that rule lives in the tool. It is a second layer, not a replacement: branch protection is what holds on GitHub's side, whatever code runs in a sandbox.
 
 Two things must line up before Foreman can do any real work. `FACTORY_REPO` must name a real repository in `owner/repo` format, and the GitHub App behind the connector you select must be installed with access to that repository. A station's sandbox clones `FACTORY_REPO` on its first session, not at deploy time, so a repository the app cannot reach surfaces as a `Cannot access <owner/repo>` error on the first task you hand it, not the deploy itself; install the app on the repository (or fix the value), then try again.
 
@@ -54,12 +54,13 @@ Configuration (see `.env.example`):
 | `FACTORY_REPO` | Yes | none | An existing GitHub repository in `owner/repo` format; the selected GitHub App must have access to it (a station's first session fails otherwise) |
 | `FACTORY_SETUP_COMMAND` | No | none | Runs once per session inside the station sandbox checkout (e.g. `pnpm install`), so the station starts with dependencies already installed. It runs with network access but no GitHub credential |
 | `FACTORY_LABEL` | No | `factory` | The issue label that hands an issue to the factory |
-| `FACTORY_BRANCH_PREFIX` | No | `factory/` | Branch prefix marking the factory's own PRs, which are the only branches automated CI fixes touch |
+| `FACTORY_BRANCH_PREFIX` | No | `factory/` | Prefix of the factory's own branches. They are the only branches the implementer can push to and the only ones automated CI fixes touch; `main` and `master` are refused whatever the prefix is |
 | `FACTORY_BOT_NAME` | No | the GitHub App's slug | The `@mention` name, resolved from the connector automatically when unset |
 | `FACTORY_INTAKE_TOKEN` | No | none | Shared secret (32 characters or more) for the HTTP intake API. Unset, only callers with a Vercel OIDC token for the project can submit |
 | `FACTORY_INTAKE_CALLBACK_HOSTS` | No | none | Comma-separated hosts (`host` or `host:port`, exact match) a ticket's `callbackUrl` may point at |
-| `FACTORY_INTAKE_CALLBACK_SECRET` | No | none | Signs status callbacks (HMAC-SHA256 in `x-factory-signature`). No callbacks are sent without it |
-| `FACTORY_STRICT_TOKEN_SCOPES` | No | off | Set to `1` to fail instead of falling back to a wider GitHub token when a narrowed one is refused |
+| `FACTORY_INTAKE_CALLBACK_SECRET` | No | none | Signs status callbacks (HMAC-SHA256 in `x-factory-signature`). Without it no callbacks are sent, and a ticket that carries a `callbackUrl` is refused with `callback_not_configured` |
+| `FACTORY_TOKEN_FALLBACK` | No | `none` | What happens when GitHub refuses a narrowed, per-command token. Unset or `none` fails closed: the command fails with a message naming the permissions to check. `repository` also allows a token with every permission the app holds, still limited to `FACTORY_REPO`. `installation` allows that, then the connector's plain installation token (every permission, every repository the installation covers). Each use of a wider token logs a warning |
+| `FACTORY_ALLOW_WORKFLOW_CHANGES` | No | off | Set to `1` to add Workflows write to the implementer's push token. Without it GitHub rejects a push that changes `.github/workflows` |
 | `GITHUB_CONNECTOR` / `LINEAR_CONNECTOR` | Yes | none | Set automatically from Vercel Connect connector UIDs |
 
 ## Local development
@@ -97,14 +98,18 @@ curl -X POST "https://<your-deployment>/intake/v1/tickets" \
   }'
 ```
 
-The answer is `202` with a `ticketId`. The run is unattended: Foreman can read, label, and open a draft pull request, and anything that would need a person's approval is refused. Poll for the result:
+The answer is `202` with a `ticketId` (a retry of the same `externalId` answers `200` with `duplicate: true` and the same `ticketId`). The run is unattended: Foreman can read, label, close or reopen an issue, and open a draft pull request, and anything that would need a person's approval is refused. Poll for the result:
 
 ```bash
 curl "https://<your-deployment>/intake/v1/tickets/<ticketId>" \
   -H "Authorization: Bearer $FACTORY_INTAKE_TOKEN"
 ```
 
-`status` moves through `queued`, `running`, and `completed` (or `failed`, `cancelled`, `awaiting-input`), and `result` carries Foreman's final message: the draft pull request link, or the questions it needs answered. The other optional fields are `source`, `requester`, `labels`, and `callbackUrl`; unknown fields are rejected.
+`status` moves through `queued`, `running`, and `completed` (or `failed`, `cancelled`, `awaiting-input`), and `result` carries Foreman's final message: the draft pull request link, or the questions it needs answered. The other optional fields are `source`, `requester`, `labels`, and `callbackUrl`; unknown fields are rejected, and every field except `body` must be a single line.
+
+A ticket belongs to the caller that submitted it: another caller asking for the same `ticketId` gets a `404`, the same answer as for an unknown id. Everyone who presents the shared `FACTORY_INTAKE_TOKEN` counts as one caller. A ticket is also one run. When `result` is a list of questions, send the answers as a new ticket with a new `externalId`; resubmitting the same `externalId` returns the original ticket and starts nothing.
+
+With a `callbackUrl` on a host listed in `FACTORY_INTAKE_CALLBACK_HOSTS`, Foreman also POSTs status updates to that URL. Each one is signed in `x-factory-signature` (hex HMAC-SHA256 of the body), carries `sentAt` inside the signed body so a receiver can refuse an old one replayed later, and has an `idempotency-key` header so a receiver can drop a repeat. A `callbackUrl` on a host that isn't listed is refused with `400` `callback_not_allowed`, and one sent to a deployment with no `FACTORY_INTAKE_CALLBACK_SECRET` with `400` `callback_not_configured`.
 
 ## Upgrading from an earlier version of this template
 
