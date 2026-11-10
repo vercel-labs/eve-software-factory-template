@@ -7,6 +7,7 @@ import { runGh } from "../lib/github/lease.js";
 import {
   COMPLEXITIES,
   PRIORITIES,
+  TRIAGE_LIMITS,
   triageWorkItem,
   WORK_ITEM_TYPES,
 } from "../lib/triage/decisions.js";
@@ -96,10 +97,13 @@ export default defineTool({
       throw new Error("Pass issue_number, or a title and body to triage.");
     }
 
-    const [labels, candidates] = await Promise.all([
+    const [vocabulary, candidates] = await Promise.all([
       fetchLabels(gh),
       findDuplicateCandidates(gh, item.title, issue?.number ?? null),
     ]);
+    // `gh` splits --add-label on commas, so a label with a comma in its name
+    // can't be applied this way; leave it out rather than fail the triage.
+    const labels = vocabulary.filter((label) => !label.name.includes(","));
     const triage = await triageWorkItem(item, labels, candidates, {
       decide,
       signal: ctx.abortSignal,
@@ -125,6 +129,8 @@ export default defineTool({
               state: issue.state,
               title: issue.title,
             },
+      labels_not_considered:
+        vocabulary.length - Math.min(labels.length, TRIAGE_LIMITS.labels),
     };
   },
   inputSchema,
@@ -154,6 +160,11 @@ export default defineTool({
       })
       .nullable(),
     labels: z.array(z.string()),
+    labels_not_considered: z
+      .number()
+      .describe(
+        "How many repository labels were not evaluated (beyond the limit, or not applicable by name). When above zero, a fitting label may have been missed."
+      ),
     lane: z.enum(["pipeline", "clarify", "answer", "duplicate"]),
     needs_clarification: z.boolean(),
     needs_research: z.boolean(),

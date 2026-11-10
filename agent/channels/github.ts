@@ -49,8 +49,10 @@ import {
  * - `onPullRequest` dispatches only on the `opened` action and skips PRs
  *   opened by bots, which covers Dependabot and the factory's own
  *   `foreman[bot]` pull requests. It is deliberately not gated by
- *   `author_association`: summarizing outside contributors' PRs is the point,
- *   and the injected task is scoped to posting a single summary comment.
+ *   `author_association`: summarizing outside contributors' PRs is the point.
+ *   Because that makes a stranger's text the run's input, the run is stamped
+ *   summary-only: the approval policies let it read and comment on that one
+ *   pull request and deny it everything else, stations included.
  * - `onCheckSuite` is the red-CI fix loop, scoped to the factory's own work:
  *   it dispatches only when a suite completes with a failure conclusion on a
  *   pull request whose head branch carries the factory prefix, so a person's

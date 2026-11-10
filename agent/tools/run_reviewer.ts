@@ -1,5 +1,6 @@
 import { defineWorkflowTool } from "eve/tools";
 import { z } from "zod";
+import { stationPolicy } from "../lib/github/approval.js";
 import { stationOutput } from "../lib/stations/result.js";
 import { REVIEWER_OUTPUT_SCHEMA } from "../lib/stations/schemas.js";
 
@@ -12,6 +13,7 @@ import { REVIEWER_OUTPUT_SCHEMA } from "../lib/stations/schemas.js";
  * - Named `run_reviewer`, not `reviewer`: the compiler rejects a tool and a local subagent with the same public name.
  */
 export default defineWorkflowTool({
+  approval: stationPolicy,
   description:
     "Independently review a pushed factory branch against the original work item and its " +
     "acceptance criteria: fetch the branch, read the real diff, re-run cheap checks, and " +

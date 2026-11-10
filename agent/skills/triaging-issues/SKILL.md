@@ -13,7 +13,7 @@ Running the pipeline on a duplicate wastes a full implementation cycle, and a du
 - When the symptom could be described in other words, search further yourself: `["issue","list","--state","all","--search","<terms>"]`. Search closed issues as well as open ones: many "new" bugs were already fixed or already rejected.
 - Search by the error message, the API or feature name, and a plain description of the symptom. One search is not enough; reporters describe the same bug in different words.
 - Treat it as a duplicate only when the underlying cause matches, not just the surface symptom. Two crashes with the same error text can have different roots.
-- When it is a duplicate of an open issue: comment linking the original by number, apply the repo's duplicate label if one exists, and note anything the new report adds (a new environment, a cleaner reproduction) on the original. Don't run the pipeline twice for one problem.
+- When it is a duplicate of an open issue: comment linking the original by number, apply the repo's duplicate label if one exists, and note anything the new report adds (a new environment, a cleaner reproduction) on the original. Don't run the pipeline twice for one problem. An unattended run can comment only on the thread it started from, so there it links the original from its own thread and leaves the note on the original to a person.
 - When it duplicates a closed issue that was fixed: point to the fix and the release that carries it, and ask the reporter to confirm on that version before closing.
 - When you are not sure, say so in your comment ("this looks related to #42") and leave both open rather than closing on a guess.
 

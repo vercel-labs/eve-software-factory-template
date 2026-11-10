@@ -3,7 +3,9 @@ import {
   factoryBrainPolicy,
   ghEffectDecision,
   ghPolicy,
+  labelDecision,
   readOnlyGhPolicy,
+  stationPolicy,
 } from "#lib/github/approval.js";
 import { parseGh } from "#lib/github/cli.js";
 import {
@@ -38,6 +40,7 @@ const MATRIX: readonly [
       anonymous: RUN,
       autonomous: RUN,
       schedule: RUN,
+      summary: RUN,
       ticket: RUN,
       trusted: RUN,
       untrusted: RUN,
@@ -50,6 +53,7 @@ const MATRIX: readonly [
       anonymous: RUN,
       autonomous: RUN,
       schedule: RUN,
+      summary: RUN,
       ticket: RUN,
       trusted: RUN,
       untrusted: RUN,
@@ -62,6 +66,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: RUN,
       schedule: RUN,
+      summary: DENY,
       ticket: RUN,
       trusted: RUN,
       untrusted: ASK,
@@ -74,6 +79,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: RUN,
       schedule: RUN,
+      summary: RUN,
       ticket: DENY,
       trusted: RUN,
       untrusted: ASK,
@@ -86,6 +92,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: DENY,
       schedule: RUN,
+      summary: DENY,
       ticket: DENY,
       trusted: RUN,
       untrusted: ASK,
@@ -98,6 +105,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: DENY,
       schedule: RUN,
+      summary: DENY,
       ticket: DENY,
       trusted: RUN,
       untrusted: ASK,
@@ -110,6 +118,7 @@ const MATRIX: readonly [
       anonymous: RUN,
       autonomous: RUN,
       schedule: RUN,
+      summary: DENY,
       ticket: RUN,
       trusted: RUN,
       untrusted: RUN,
@@ -122,6 +131,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: DENY,
       schedule: RUN,
+      summary: DENY,
       ticket: DENY,
       trusted: RUN,
       untrusted: ASK,
@@ -134,6 +144,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: RUN,
       schedule: RUN,
+      summary: DENY,
       ticket: DENY,
       trusted: RUN,
       untrusted: ASK,
@@ -156,6 +167,7 @@ const MATRIX: readonly [
       anonymous: RUN,
       autonomous: RUN,
       schedule: RUN,
+      summary: DENY,
       ticket: RUN,
       trusted: RUN,
       untrusted: RUN,
@@ -180,6 +192,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: DENY,
       schedule: RUN,
+      summary: DENY,
       ticket: DENY,
       trusted: RUN,
       untrusted: ASK,
@@ -192,6 +205,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: DENY,
       schedule: RUN,
+      summary: DENY,
       ticket: DENY,
       trusted: RUN,
       untrusted: ASK,
@@ -204,6 +218,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: DENY,
       schedule: RUN,
+      summary: DENY,
       ticket: DENY,
       trusted: RUN,
       untrusted: ASK,
@@ -216,6 +231,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: DENY,
       schedule: ASK,
+      summary: DENY,
       ticket: DENY,
       trusted: ASK,
       untrusted: ASK,
@@ -228,6 +244,7 @@ const MATRIX: readonly [
       anonymous: ASK,
       autonomous: DENY,
       schedule: ASK,
+      summary: DENY,
       ticket: DENY,
       trusted: ASK,
       untrusted: ASK,
@@ -240,6 +257,7 @@ const MATRIX: readonly [
       anonymous: DENY,
       autonomous: DENY,
       schedule: DENY,
+      summary: DENY,
       ticket: DENY,
       trusted: DENY,
       untrusted: DENY,
@@ -252,6 +270,7 @@ const MATRIX: readonly [
       anonymous: DENY,
       autonomous: DENY,
       schedule: DENY,
+      summary: DENY,
       ticket: DENY,
       trusted: DENY,
       untrusted: DENY,
@@ -264,6 +283,7 @@ const MATRIX: readonly [
       anonymous: DENY,
       autonomous: DENY,
       schedule: DENY,
+      summary: DENY,
       ticket: DENY,
       trusted: DENY,
       untrusted: DENY,
@@ -284,7 +304,7 @@ describe("ghPolicy: the authorization matrix", () => {
 
   test("an unattended run is never asked to wait for approval, whatever the command", () => {
     for (const [, args] of MATRIX) {
-      for (const caller of ["autonomous", "ticket"] as const) {
+      for (const caller of ["autonomous", "ticket", "summary"] as const) {
         expect(outcome(decide(caller, ...args))).not.toBe(ASK);
       }
     }
@@ -398,6 +418,7 @@ describe("factoryBrainPolicy", () => {
     ["anonymous", ASK],
     ["autonomous", DENY],
     ["ticket", DENY],
+    ["summary", DENY],
   ])("%s: %s", (caller, expected) => {
     expect(
       outcome(
@@ -428,5 +449,80 @@ describe("the matrix covers every effect the parser can produce", () => {
         "write",
       ].sort()
     );
+  });
+});
+
+describe("a summary-only run", () => {
+  test("may read anything in the repository and comment on its own pull request, by number only", () => {
+    expect(
+      outcome(
+        decide("summary", "pr", "view", "12", "--json", "title,body,files")
+      )
+    ).toBe(RUN);
+    expect(outcome(decide("summary", "pr", "diff", "12"))).toBe(RUN);
+    expect(
+      outcome(decide("summary", "pr", "comment", "12", "--body", "Summary"))
+    ).toBe(RUN);
+    expect(
+      outcome(decide("summary", "issue", "comment", "12", "--body", "Summary"))
+    ).toBe(RUN);
+    expect(
+      outcome(
+        decide("summary", "pr", "comment", "factory/x", "--body", "Summary")
+      )
+    ).toBe(DENY);
+  });
+
+  test("is denied the things an ordinary unattended run may do", () => {
+    for (const args of [
+      ["issue", "edit", "12", "--add-label", "bug"],
+      ["issue", "close", "12"],
+      ["issue", "reopen", "40"],
+      [
+        "pr",
+        "create",
+        "--draft",
+        "--head",
+        "factory/x",
+        "--title",
+        "T",
+        "--body",
+        "B",
+      ],
+    ]) {
+      expect(outcome(decide("autonomous", ...args))).toBe(RUN);
+      const status = decide("summary", ...args);
+      expect(outcome(status)).toBe(DENY);
+      expect(reasonOf(status)).toMatch(/only reads the pull request/);
+    }
+  });
+
+  test("cannot start a station; every other caller can", () => {
+    for (const [caller, auth] of Object.entries(CALLERS)) {
+      expect(
+        outcome(stationPolicy(approvalContext(auth, { message: "build it" })))
+      ).toBe(caller === "summary" ? DENY : RUN);
+    }
+  });
+
+  test("cannot have triage apply labels", () => {
+    expect(outcome(labelDecision(CALLERS.summary))).toBe(DENY);
+    expect(outcome(labelDecision(CALLERS.autonomous))).toBe(RUN);
+  });
+
+  test("a scope attribute on a principal that is not the unattended one grants and removes nothing", () => {
+    const forged = {
+      ...CALLERS.trusted,
+      attributes: { ...CALLERS.trusted.attributes, factoryScope: "summary" },
+    };
+    expect(
+      outcome(
+        ghPolicy(
+          approvalContext(forged, {
+            args: ["issue", "edit", "1", "--add-label", "bug"],
+          })
+        )
+      )
+    ).toBe(RUN);
   });
 });

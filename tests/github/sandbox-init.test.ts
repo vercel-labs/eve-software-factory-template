@@ -70,6 +70,8 @@ const lease = () => {
 beforeEach(() => {
   resetTokenScopeMemo();
   vi.stubEnv("FACTORY_BOT_NAME", "foreman");
+  vi.stubEnv("FACTORY_TOKEN_FALLBACK", "");
+  vi.stubEnv("FACTORY_ALLOW_WORKFLOW_CHANGES", "");
 });
 
 afterEach(() => {
@@ -231,7 +233,8 @@ describe("the token ladder", () => {
     return { mint, requests };
   };
 
-  test("the last rung is the connector's installation token, and using it is logged", async () => {
+  test("with FACTORY_TOKEN_FALLBACK=installation the last rung is the connector's installation token, and using it is logged", async () => {
+    vi.stubEnv("FACTORY_TOKEN_FALLBACK", "installation");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { mint, requests } = refusing(() => false);
     const token = await mintScopedToken("repo-read", {
@@ -252,22 +255,25 @@ describe("the token ladder", () => {
     );
   });
 
-  test("strict mode never reaches the wide rungs", async () => {
-    vi.stubEnv("FACTORY_STRICT_TOKEN_SCOPES", "1");
-    let installationCalls = 0;
-    const { mint, requests } = refusing(() => false);
-    await expect(
-      mintScopedToken("repo-push", {
-        installationToken: async () => {
-          installationCalls += 1;
-          return "ghs_never";
-        },
-        mint,
-      })
-    ).rejects.toThrow(/Could not mint a GitHub token/);
-    expect(requests).toHaveLength(2);
-    expect(installationCalls).toBe(0);
-  });
+  test.each(["", "none", "off", "1", "true", "REPOSITORY-ish"])(
+    "FACTORY_TOKEN_FALLBACK=%j never reaches the wide rungs",
+    async (setting) => {
+      vi.stubEnv("FACTORY_TOKEN_FALLBACK", setting);
+      let installationCalls = 0;
+      const { mint, requests } = refusing(() => false);
+      await expect(
+        mintScopedToken("repo-push", {
+          installationToken: async () => {
+            installationCalls += 1;
+            return "ghs_never";
+          },
+          mint,
+        })
+      ).rejects.toThrow(/Could not mint a GitHub token/);
+      expect(requests).toEqual([["contents:write"]]);
+      expect(installationCalls).toBe(0);
+    }
+  );
 
   test("a narrower-than-ideal result is retried at full width once the memo expires", async () => {
     let clock = 1_000_000;

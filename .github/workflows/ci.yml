@@ -30,6 +30,11 @@ jobs:
       # Everything here is offline and deterministic: no model, no GitHub App,
       # no Blob store, no sandbox. The suite sets its own placeholder
       # environment, so the job needs no secrets.
+      #
+      # FACTORY_REQUIRE_CLI_TESTS makes the tests that run the real git and
+      # gh binaries (both ship on the hosted runners) fail when a binary is
+      # missing, where a local run would skip them.
       - run: pnpm validate
         env:
           EVE_TELEMETRY_DISABLED: "1"
+          FACTORY_REQUIRE_CLI_TESTS: "1"

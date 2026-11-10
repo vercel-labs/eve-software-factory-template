@@ -8,11 +8,13 @@ import { MODELS } from "../../lib/models.js";
  * Executes the analyst's plan in its own checkout of the factory repository,
  * verifies the work with the repository's own checks, commits on a feature
  * branch, and pushes it with its `git` tool (`agent/lib/github/tools.ts`).
- * The push is the station's only side effect and it is inert by
- * construction: feature branches only (main and master are refused in
- * code), the credential is leased for that one command at the sandbox
- * firewall and scoped to repository contents, and a branch alone can't
- * merge. The pull request is opened later by the orchestrator, after review.
+ * The push is the station's only side effect, and it is bounded in code:
+ * only branches under the factory's own prefix (`FACTORY_BRANCH_PREFIX`),
+ * never main or master, no force and no deletes; the credential is leased
+ * for that one command at the sandbox firewall and scoped to repository
+ * contents. A pushed branch can still start whatever the repository runs on
+ * a push, so the default branch needs branch protection all the same. The
+ * pull request is opened later by the orchestrator, after review.
  *
  * `tool: false` hides the station from the orchestrator; it calls it through
  * the `run_implementer` workflow tool, which attaches the output schema.

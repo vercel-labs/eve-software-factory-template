@@ -98,8 +98,18 @@ export const ticketIdFor = (
         .toString("hex")
         .slice(0, 32);
 
-/** The channel address a ticket's session lives at. */
-export const ticketAddress = (ticketId: string): string => `ticket:${ticketId}`;
+/**
+ * The channel address a ticket's session lives at.
+ *
+ * @remarks
+ * The address carries a digest of the verified caller next to the ticket id,
+ * so a ticket can only be found by the caller that submitted it. An id with
+ * an `externalId` behind it is derived, not secret; without the caller in the
+ * address, anyone holding a different valid credential who could guess a
+ * support system's ticket number could read that ticket's status and result.
+ */
+export const ticketAddress = (ticketId: string, callerId: string): string =>
+  `ticket:${sha256(callerId).toString("hex").slice(0, 16)}:${ticketId}`;
 
 /**
  * Renders the ticket as the session's first message.

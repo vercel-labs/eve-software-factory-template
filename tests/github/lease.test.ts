@@ -6,6 +6,7 @@ import {
   leasePolicy,
   MAX_OUTPUT_CHARACTERS,
   mintScopedToken,
+  permissionsFor,
   resetTokenScopeMemo,
   runGh,
   runGitNetwork,
@@ -87,6 +88,9 @@ const git = (...args: string[]) => {
 
 beforeEach(() => {
   resetTokenScopeMemo();
+  // The suite's expectations are about the defaults, whatever the developer's shell exports.
+  vi.stubEnv("FACTORY_TOKEN_FALLBACK", "");
+  vi.stubEnv("FACTORY_ALLOW_WORKFLOW_CHANGES", "");
 });
 
 afterEach(() => {
@@ -344,7 +348,7 @@ describe("runGitNetwork", () => {
       id: () => "lease-4",
       mint,
     });
-    expect(requests[0]).toEqual(["contents:write", "workflows:write"]);
+    expect(requests[0]).toEqual(["contents:write"]);
     expect(steps[0]).toEqual({
       kind: "policy",
       policy: leasePolicy("git", TOKEN, "factory-lease-4"),
@@ -446,13 +450,14 @@ describe("leases on one sandbox never overlap", () => {
 });
 
 describe("token scopes", () => {
-  test("no scope except repo-push can write repository contents", () => {
-    for (const [scope, permissions] of Object.entries(TOKEN_SCOPES)) {
-      const all = [...permissions.required, ...permissions.optional];
+  test("no scope except repo-push can write repository contents, and none can change workflows by default", () => {
+    for (const scope of ["repo-read", "repo-triage", "repo-push"] as const) {
+      const { optional, required } = permissionsFor(scope);
+      const all = [...required, ...optional];
+      expect(all).not.toContain("workflows:write");
+      expect(all).not.toContain("administration:write");
       if (scope !== "repo-push") {
         expect(all).not.toContain("contents:write");
-        expect(all).not.toContain("workflows:write");
-        expect(all).not.toContain("administration:write");
       }
     }
     expect(TOKEN_SCOPES["repo-triage"].required).toEqual([
@@ -465,6 +470,16 @@ describe("token scopes", () => {
         entry.endsWith(":read")
       )
     ).toBe(true);
+  });
+
+  test("workflow changes are an explicit opt-in on the push scope only", () => {
+    vi.stubEnv("FACTORY_ALLOW_WORKFLOW_CHANGES", "1");
+    expect(permissionsFor("repo-push")).toEqual({
+      optional: ["workflows:write"],
+      required: ["contents:write"],
+    });
+    expect(permissionsFor("repo-read")).toBe(TOKEN_SCOPES["repo-read"]);
+    expect(permissionsFor("repo-triage")).toBe(TOKEN_SCOPES["repo-triage"]);
   });
 
   test("the widest set the installation grants is requested first, and remembered", async () => {
@@ -498,39 +513,91 @@ describe("token scopes", () => {
     expect(requests.at(-1)).toEqual(TOKEN_SCOPES["repo-read"].required);
   });
 
-  test("when narrowing is refused outright, the token falls back to the app's permissions and says so", async () => {
+  test("by default a scope never widens: when narrowing is refused the command fails, whatever the error", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const mint: TokenMinter = async (permissions) => {
-      if (permissions !== null) {
-        throw new Error("unsupported");
-      }
-      return TOKEN;
-    };
-    expect(await mintScopedToken("repo-triage", { mint })).toBe(TOKEN);
+    let installationCalls = 0;
+    for (const failure of [
+      "422: permissions not granted",
+      "ETIMEDOUT",
+      "500 Internal Server Error",
+    ]) {
+      resetTokenScopeMemo();
+      const requests: (readonly string[] | null)[] = [];
+      await expect(
+        mintScopedToken("repo-read", {
+          installationToken: async () => {
+            installationCalls += 1;
+            return "FULL-INSTALLATION-TOKEN";
+          },
+          mint: async (permissions) => {
+            requests.push(permissions);
+            throw new Error(failure);
+          },
+        })
+      ).rejects.toThrow(/Could not mint a GitHub token for scope "repo-read"/);
+      expect(requests).toHaveLength(2);
+      expect(requests).not.toContain(null);
+    }
+    expect(installationCalls).toBe(0);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("the failure names the permissions to check and the setting that would allow a wider token", async () => {
+    await expect(
+      mintScopedToken("repo-triage", {
+        mint: async () => {
+          throw new Error("refused");
+        },
+      })
+    ).rejects.toThrow(
+      /contents:read, issues:write, pull_requests:write.*FACTORY_TOKEN_FALLBACK=repository/s
+    );
+  });
+
+  test("FACTORY_TOKEN_FALLBACK=repository allows the app's permissions on the factory repository, and says so", async () => {
+    vi.stubEnv("FACTORY_TOKEN_FALLBACK", "repository");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let installationCalls = 0;
+    const requests: (readonly string[] | null)[] = [];
+    const token = await mintScopedToken("repo-triage", {
+      installationToken: async () => {
+        installationCalls += 1;
+        return "FULL";
+      },
+      mint: async (permissions) => {
+        requests.push(permissions);
+        if (permissions !== null) {
+          throw new Error("unsupported");
+        }
+        return TOKEN;
+      },
+    });
+    expect(token).toBe(TOKEN);
+    expect(requests.at(-1)).toBeNull();
+    expect(installationCalls).toBe(0);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toMatch(/could not be narrowed/);
   });
 
-  test("strict mode refuses that fallback", async () => {
-    vi.stubEnv("FACTORY_STRICT_TOKEN_SCOPES", "1");
-    const requests: (readonly string[] | null)[] = [];
-    const mint: TokenMinter = async (permissions) => {
-      requests.push(permissions);
-      if (permissions !== null) {
-        throw new Error("unsupported");
-      }
-      return TOKEN;
-    };
-    await expect(mintScopedToken("repo-triage", { mint })).rejects.toThrow(
-      /Could not mint a GitHub token/
-    );
-    expect(requests).not.toContain(null);
-  });
-
   test("an empty token is treated as a failure, not as a credential", async () => {
-    vi.stubEnv("FACTORY_STRICT_TOKEN_SCOPES", "1");
     await expect(
       mintScopedToken("repo-read", { mint: async () => "" })
     ).rejects.toThrow(/Could not mint a GitHub token/);
+  });
+
+  test("a remembered rung that stops working is forgotten, and the ladder is walked again", async () => {
+    const installation: { grantsChecks: boolean } = { grantsChecks: true };
+    const requests: (readonly string[] | null)[] = [];
+    const mint: TokenMinter = async (permissions) => {
+      requests.push(permissions);
+      if (!installation.grantsChecks && permissions?.includes("checks:read")) {
+        throw new Error("422: permission removed");
+      }
+      return TOKEN;
+    };
+    await mintScopedToken("repo-read", { mint });
+    installation.grantsChecks = false;
+    expect(await mintScopedToken("repo-read", { mint })).toBe(TOKEN);
+    expect(requests.at(-1)).toEqual(TOKEN_SCOPES["repo-read"].required);
   });
 });

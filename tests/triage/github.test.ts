@@ -755,10 +755,11 @@ describe("fetchChecks", () => {
     },
   ];
 
-  test("summarises the checks: failing ones in detail, pending and total as counts", async () => {
+  test("summarises the checks: failing ones in detail; pending, cancelled, and total as counts", async () => {
     const { calls, gh } = fakeGh(() => jsonAnswer(CHECKS));
 
     await expect(fetchChecks(gh, 34)).resolves.toEqual({
+      cancelled: 1,
       failing: [
         {
           link: "https://github.com/acme/widgets/actions/runs/100/job/2",
@@ -852,6 +853,22 @@ describe("fetchChecks", () => {
     const { gh } = fakeGh(() => jsonAnswer([]));
 
     await expect(fetchChecks(gh, 1)).resolves.toEqual({
+      cancelled: 0,
+      failing: [],
+      pending: 0,
+      total: 0,
+    });
+  });
+
+  test('treats gh\'s "no checks reported" error as an empty summary, not a failure', async () => {
+    const { gh } = fakeGh(() => ({
+      exitCode: 1,
+      stderr: "no checks reported on the 'factory/bug-x' branch",
+      stdout: "",
+    }));
+
+    await expect(fetchChecks(gh, 34)).resolves.toEqual({
+      cancelled: 0,
       failing: [],
       pending: 0,
       total: 0,

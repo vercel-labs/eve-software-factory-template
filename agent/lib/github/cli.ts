@@ -38,9 +38,24 @@ export type GhEffect =
   | { readonly kind: "forbidden"; readonly reason: string };
 
 /** A validated `gh` invocation, ready to hand to the sandbox. */
+/** Where a `--body` value sits in a validated argv. */
+export interface BodyArgument {
+  /** Index in `args` of the flag token (`--body`, `-b`, or `--body=...`). */
+  readonly at: number;
+  readonly content: string;
+  /** How many argv elements the flag and its value take up: 1 or 2. */
+  readonly span: 1 | 2;
+}
+
 export interface GhInvocation {
   /** Normalized argv without the leading `gh` and without `--repo`. */
   readonly args: readonly string[];
+  /**
+   * The `--body` arguments, located by the same pass that validated the
+   * argv. Anything that rewrites the argv works from these positions, never
+   * from a second reading of the tokens.
+   */
+  readonly bodies: readonly BodyArgument[];
   /** The command path, e.g. `issue comment`. */
   readonly command: string;
   readonly effect: Exclude<GhEffect, { kind: "forbidden" }>;
@@ -54,9 +69,19 @@ export type GhParseResult =
 export const MAX_GH_ARGS = 64;
 export const MAX_GH_ARG_LENGTH = 65_536;
 
+interface FlagOccurrence {
+  /** Index of the flag token among the arguments after the command path. */
+  readonly index: number;
+  readonly long: string;
+  readonly span: 1 | 2;
+  readonly value: string;
+}
+
 interface ParsedFlags {
   /** Canonical long flag name to its values (booleans store `"true"`). */
   readonly flags: ReadonlyMap<string, readonly string[]>;
+  /** Every flag as it appeared, in order. */
+  readonly occurrences: readonly FlagOccurrence[];
   readonly positionals: readonly string[];
 }
 
@@ -140,20 +165,28 @@ const editEffect = (parsed: ParsedFlags, allowBranch: boolean): GhEffect =>
 
 const commentEffect = (parsed: ParsedFlags, allowBranch: boolean): GhEffect =>
   onThread(parsed, allowBranch, (thread) => {
-    if (!(parsed.flags.has("body") || parsed.flags.has("body-file"))) {
+    if (!parsed.flags.has("body")) {
       return forbidden(
-        "Pass the comment with --body or --body-file; there is no editor here."
+        "Pass the comment text with --body; there is no editor here."
       );
     }
     return { kind: "comment", thread };
   });
 
 const stateEffect = (parsed: ParsedFlags): GhEffect =>
-  onThread(parsed, false, (thread) => ({
-    commentThread: thread,
-    kind: "state",
-    withComment: parsed.flags.has("comment"),
-  }));
+  onThread(parsed, false, (thread) => {
+    for (const original of parsed.flags.get("duplicate-of") ?? []) {
+      const resolved = threadNumber(original, false);
+      if (typeof resolved === "string") {
+        return forbidden(resolved);
+      }
+    }
+    return {
+      commentThread: thread,
+      kind: "state",
+      withComment: parsed.flags.has("comment"),
+    };
+  });
 
 const EDIT_VALUE_FLAGS = [
   "add-assignee",
@@ -161,7 +194,6 @@ const EDIT_VALUE_FLAGS = [
   "add-label",
   "remove-label",
   "b|body",
-  "F|body-file",
   "m|milestone",
   "t|title",
 ] as const;
@@ -171,7 +203,7 @@ const COMMENT_SPEC = (allowBranch: boolean): CommandSpec => ({
   effect: (parsed) => commentEffect(parsed, allowBranch),
   maxPositionals: 1,
   minPositionals: 1,
-  value: ["b|body", "F|body-file"],
+  value: ["b|body"],
 });
 
 const API_HEADER_PATTERN = /^(accept|x-github-api-version)\s*:/i;
@@ -210,6 +242,48 @@ const apiEffect = (parsed: ParsedFlags): GhEffect => {
       );
 };
 
+const SEARCH_SCOPE_QUALIFIER = /(?:^|\s|\()-?(?:repo|org|user|owner):/i;
+const NUMERIC_ID = /^\d{1,20}$/;
+const WORKFLOW_SELECTOR = /^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$/;
+
+/**
+ * A read that lists or searches. `gh` scopes the search to the factory
+ * repository by adding its own `repo:` qualifier; a second one in the query
+ * would widen the search to wherever it points, so qualifiers that choose a
+ * repository or an owner are refused.
+ */
+const listEffect = (parsed: ParsedFlags): GhEffect => {
+  for (const query of parsed.flags.get("search") ?? []) {
+    if (SEARCH_SCOPE_QUALIFIER.test(query)) {
+      return forbidden(
+        `Searches stay inside ${FACTORY_REPO}; leave out repo:, org:, user:, and owner: qualifiers.`
+      );
+    }
+  }
+  return READ;
+};
+
+/** Accepts a selector only when it matches `pattern`; a missing one is fine. */
+const selectorEffect =
+  (pattern: RegExp, what: string) =>
+  (parsed: ParsedFlags): GhEffect => {
+    const [selector] = parsed.positionals;
+    return selector === undefined || pattern.test(selector)
+      ? READ
+      : forbidden(`"${selector}" is not ${what}.`);
+  };
+
+const runViewEffect = (parsed: ParsedFlags): GhEffect => {
+  for (const flag of ["job", "attempt"]) {
+    for (const value of parsed.flags.get(flag) ?? []) {
+      if (!NUMERIC_ID.test(value)) {
+        return forbidden(`--${flag} takes a number.`);
+      }
+    }
+  }
+  return selectorEffect(NUMERIC_ID, "a run id")(parsed);
+};
+
 /**
  * The allowlist: every `gh` command the factory may run, the flags each one
  * accepts, and the effect it has. Interactive and browser flags (`--web`,
@@ -233,19 +307,11 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   "issue comment": COMMENT_SPEC(false),
   "issue create": {
     effect: (parsed) =>
-      parsed.flags.has("title") &&
-      (parsed.flags.has("body") || parsed.flags.has("body-file"))
+      parsed.flags.has("title") && parsed.flags.has("body")
         ? WRITE
-        : forbidden("Pass --title and --body (or --body-file)."),
+        : forbidden("Pass --title and --body."),
     maxPositionals: 0,
-    value: [
-      "a|assignee",
-      "b|body",
-      "F|body-file",
-      "l|label",
-      "m|milestone",
-      "t|title",
-    ],
+    value: ["a|assignee", "b|body", "l|label", "m|milestone", "t|title"],
   },
   "issue edit": {
     bool: ["remove-milestone"],
@@ -255,7 +321,7 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     value: EDIT_VALUE_FLAGS,
   },
   "issue list": {
-    effect: () => READ,
+    effect: listEffect,
     maxPositionals: 0,
     value: [
       "a|assignee",
@@ -292,7 +358,7 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     value: ["c|color", "d|description"],
   },
   "label list": {
-    effect: () => READ,
+    effect: listEffect,
     maxPositionals: 0,
     value: ["L|limit", "S|search", "order", "sort", ...JSON_FLAGS],
   },
@@ -317,11 +383,11 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
         !(
           parsed.flags.has("head") &&
           parsed.flags.has("title") &&
-          (parsed.flags.has("body") || parsed.flags.has("body-file"))
+          parsed.flags.has("body")
         )
       ) {
         return forbidden(
-          "Pass --head, --title, and --body (or --body-file); nothing is inferred from a checkout here."
+          "Pass --head, --title, and --body; nothing is inferred from a checkout here."
         );
       }
       if (!parsed.flags.has("draft")) {
@@ -337,7 +403,6 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
       "a|assignee",
       "B|base",
       "b|body",
-      "F|body-file",
       "H|head",
       "l|label",
       "m|milestone",
@@ -361,7 +426,7 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   },
   "pr list": {
     bool: ["d|draft"],
-    effect: () => READ,
+    effect: listEffect,
     maxPositionals: 0,
     value: [
       "a|assignee",
@@ -412,7 +477,12 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     value: ["L|limit", "O|order", ...JSON_FLAGS],
   },
   "release view": {
-    effect: () => READ,
+    effect: (parsed) => {
+      const [tag] = parsed.positionals;
+      return tag === undefined || (REF_PATTERN.test(tag) && !tag.includes(".."))
+        ? READ
+        : forbidden(`"${tag}" is not a release tag.`);
+    },
     maxPositionals: 1,
     value: JSON_FLAGS,
   },
@@ -422,8 +492,7 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
       if (target === undefined) {
         return READ;
       }
-      const [owner = "", name = ""] = target.split("/");
-      return sameRepo(owner, name)
+      return isFactoryRepoValue(target)
         ? READ
         : forbidden(`This factory only works on ${FACTORY_REPO}.`);
     },
@@ -448,7 +517,7 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   },
   "run view": {
     bool: ["exit-status", "log", "log-failed", "v|verbose"],
-    effect: () => READ,
+    effect: runViewEffect,
     maxPositionals: 1,
     value: ["a|attempt", "j|job", ...JSON_FLAGS],
   },
@@ -460,7 +529,7 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   },
   "workflow view": {
     bool: ["y|yaml"],
-    effect: () => READ,
+    effect: selectorEffect(WORKFLOW_SELECTOR, "a workflow id or file name"),
     maxPositionals: 1,
     minPositionals: 1,
     value: ["r|ref"],
@@ -498,6 +567,32 @@ export const GH_COMMAND_SHORT_FLAGS: Readonly<
       .map((entry) => entry.split("|"))
       .filter((parts): parts is [string, string] => parts.length === 2)
       .map(([short, long]) => [short, long] as const),
+  ])
+);
+
+/**
+ * Whether each flag takes a value (`"value"`) or is a switch (`"bool"`), per
+ * command.
+ *
+ * @remarks
+ * The parser decides from this whether the next argument belongs to a flag.
+ * A flag recorded under the wrong kind would make the parser read the
+ * arguments differently from the GitHub CLI, so the test suite holds this
+ * against the CLI's help as well.
+ */
+export const GH_COMMAND_FLAG_KINDS: Readonly<
+  Record<string, Readonly<Record<string, "bool" | "value">>>
+> = Object.fromEntries(
+  Object.entries(COMMANDS).map(([command, spec]) => [
+    command,
+    Object.fromEntries([
+      ...(spec.value ?? []).map(
+        (entry) => [entry.split("|").at(-1) ?? entry, "value"] as const
+      ),
+      ...(spec.bool ?? []).map(
+        (entry) => [entry.split("|").at(-1) ?? entry, "bool"] as const
+      ),
+    ]),
   ])
 );
 
@@ -625,6 +720,73 @@ const readFlagValue = (
   return next === undefined ? "missing" : { consumed: 1, value: next };
 };
 
+const positionalRefusal = (
+  command: string,
+  spec: CommandSpec,
+  count: number
+): string | null => {
+  if (count > spec.maxPositionals) {
+    return `gh ${command} takes at most ${spec.maxPositionals} positional argument(s).`;
+  }
+  if (count < (spec.minPositionals ?? 0)) {
+    return `gh ${command} needs ${spec.minPositionals} positional argument(s), like an issue or pull request number.`;
+  }
+  return null;
+};
+
+/**
+ * Flags that may be given more than once, because `gh` adds their values
+ * together.
+ *
+ * @remarks
+ * Every other flag is refused the second time it appears. For a
+ * single-valued flag `gh` keeps the last occurrence, so a check that looked
+ * at the first one would approve one command and run another: with
+ * `--method GET --method PUT`, the request that goes out is a PUT.
+ */
+const REPEATABLE_FLAGS = new Set([
+  "add-assignee",
+  "add-label",
+  "add-reviewer",
+  "assignee",
+  "header",
+  "label",
+  "remove-assignee",
+  "remove-label",
+  "remove-reviewer",
+  "reviewer",
+]);
+
+/**
+ * Reads the flag at `rest[index]`, with its value when it takes one.
+ *
+ * @returns Where the flag sits and what it carries, or the refusal.
+ */
+const readFlag = (
+  command: string,
+  spec: CommandSpec,
+  table: FlagTable,
+  rest: readonly string[],
+  index: number
+): FlagOccurrence | string => {
+  const arg = rest[index] ?? "";
+  const token = readFlagToken(arg, table);
+  const read =
+    token === null ? "unknown" : readFlagValue(token, table, rest[index + 1]);
+  if (token === null || read === "unknown") {
+    return `gh ${command} does not accept ${arg} here. Allowed flags: ${describeFlags(spec)}. Pass each flag and its value as separate arguments.`;
+  }
+  if (read === "missing") {
+    return `gh ${command}: ${arg} needs a value.`;
+  }
+  return {
+    index,
+    long: token.long,
+    span: read.consumed === 1 ? 2 : 1,
+    value: read.value,
+  };
+};
+
 const parseFlags = (
   command: string,
   spec: CommandSpec,
@@ -632,9 +794,8 @@ const parseFlags = (
 ): ParsedFlags | string => {
   const table = flagTable(spec);
   const flags = new Map<string, string[]>();
+  const occurrences: FlagOccurrence[] = [];
   const positionals: string[] = [];
-  const unknown = (arg: string) =>
-    `gh ${command} does not accept ${arg} here. Allowed flags: ${describeFlags(spec)}. Pass each flag and its value as separate arguments.`;
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index] ?? "";
     if (arg === "--") {
@@ -644,25 +805,25 @@ const parseFlags = (
       positionals.push(arg);
       continue;
     }
-    const token = readFlagToken(arg, table);
-    const read =
-      token === null ? "unknown" : readFlagValue(token, table, rest[index + 1]);
-    if (token === null || read === "unknown") {
-      return unknown(arg);
+    const flag = readFlag(command, spec, table, rest, index);
+    if (typeof flag === "string") {
+      return flag;
     }
-    if (read === "missing") {
-      return `gh ${command}: ${arg} needs a value.`;
+    const earlier = flags.get(flag.long);
+    if (earlier !== undefined && !REPEATABLE_FLAGS.has(flag.long)) {
+      return `gh ${command}: pass --${flag.long} once.`;
     }
-    flags.set(token.long, [...(flags.get(token.long) ?? []), read.value]);
-    index += read.consumed;
+    flags.set(flag.long, [...(earlier ?? []), flag.value]);
+    occurrences.push(flag);
+    index += flag.span - 1;
   }
-  if (positionals.length > spec.maxPositionals) {
-    return `gh ${command} takes at most ${spec.maxPositionals} positional argument(s).`;
-  }
-  if (positionals.length < (spec.minPositionals ?? 0)) {
-    return `gh ${command} needs ${spec.minPositionals} positional argument(s), like an issue or pull request number.`;
-  }
-  return { flags, positionals };
+  return (
+    positionalRefusal(command, spec, positionals.length) ?? {
+      flags,
+      occurrences,
+      positionals,
+    }
+  );
 };
 
 const checkShape = (args: readonly string[]): string | null => {
@@ -674,7 +835,7 @@ const checkShape = (args: readonly string[]): string | null => {
   }
   for (const arg of args) {
     if (arg.length > MAX_GH_ARG_LENGTH) {
-      return `An argument is too long (limit ${MAX_GH_ARG_LENGTH} characters). Write long text to a file and pass --body-file.`;
+      return `An argument is too long (limit ${MAX_GH_ARG_LENGTH} characters). Shorten it.`;
     }
     if (arg.includes("\0")) {
       return "Arguments cannot contain NUL bytes.";
@@ -731,8 +892,15 @@ export const parseGh = (argv: readonly string[]): GhParseResult => {
     command === "repo view" && parsed.positionals.length === 0
       ? [...stripped.args, FACTORY_REPO]
       : stripped.args;
+  const bodies = parsed.occurrences
+    .filter((occurrence) => occurrence.long === "body")
+    .map((occurrence) => ({
+      at: commandLength + occurrence.index,
+      content: occurrence.value,
+      span: occurrence.span,
+    }));
   return {
-    invocation: { args, command, effect },
+    invocation: { args, bodies, command, effect },
     ok: true,
   };
 };
@@ -773,16 +941,6 @@ export const GH_BINARY = "/usr/bin/gh";
 export const ghCommandLine = (args: readonly string[]): string =>
   [GH_BINARY, ...args.map(shellQuote)].join(" ");
 
-/** Commands whose `-b/--body` flag carries free text (not a branch). */
-const BODY_COMMANDS = new Set([
-  "issue comment",
-  "issue create",
-  "issue edit",
-  "pr comment",
-  "pr create",
-  "pr edit",
-]);
-
 export interface BodyFile {
   readonly content: string;
   readonly path: string;
@@ -798,32 +956,28 @@ export interface BodyFile {
  * line entirely, which sidesteps both the kernel's argument-size limit and
  * any doubt about quoting.
  *
+ * The rewrite works from the positions the parser recorded
+ * ({@link GhInvocation.bodies}), so the command that runs is the command
+ * that was classified and approved, token for token, with only the body
+ * arguments swapped. `--body-file` is not something a caller can pass; it
+ * only ever appears here, pointing at a file this function named.
+ *
  * @param pathFor - Names the file for the nth body.
  */
 export const bodiesToFiles = (
   invocation: GhInvocation,
   pathFor: (index: number) => string
 ): { args: string[]; files: BodyFile[] } => {
-  if (!BODY_COMMANDS.has(invocation.command)) {
-    return { args: [...invocation.args], files: [] };
-  }
-  const args: string[] = [];
   const files: BodyFile[] = [];
-  const add = (content: string) => {
+  const args: string[] = [];
+  let next = 0;
+  for (const body of [...invocation.bodies].sort((a, b) => a.at - b.at)) {
+    args.push(...invocation.args.slice(next, body.at));
     const path = pathFor(files.length);
-    files.push({ content, path });
+    files.push({ content: body.content, path });
     args.push("--body-file", path);
-  };
-  for (let index = 0; index < invocation.args.length; index += 1) {
-    const arg = invocation.args[index] ?? "";
-    if (arg === "-b" || arg === "--body") {
-      add(invocation.args[index + 1] ?? "");
-      index += 1;
-    } else if (arg.startsWith("--body=")) {
-      add(arg.slice("--body=".length));
-    } else {
-      args.push(arg);
-    }
+    next = body.at + body.span;
   }
+  args.push(...invocation.args.slice(next));
   return { args, files };
 };

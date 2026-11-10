@@ -326,15 +326,34 @@ describe("TICKET_ID_PATTERN", () => {
 });
 
 describe("ticketAddress", () => {
-  test("places a ticket in the ticket: address space", () => {
+  test("places a ticket in the ticket: address space, under its caller", () => {
     const id = ticketIdFor("intake:shared-token", "HELP-4821");
 
-    expect(ticketAddress(id)).toBe(`ticket:${id}`);
+    expect(ticketAddress(id, "intake:shared-token")).toMatch(
+      new RegExp(`^ticket:[0-9a-f]{16}:${id}$`)
+    );
+    expect(ticketAddress(id, "intake:shared-token")).toBe(
+      ticketAddress(id, "intake:shared-token")
+    );
   });
 
   test("gives different tickets different addresses", () => {
-    expect(ticketAddress("a".repeat(32))).not.toBe(
-      ticketAddress("b".repeat(32))
+    expect(ticketAddress("a".repeat(32), "caller")).not.toBe(
+      ticketAddress("b".repeat(32), "caller")
+    );
+  });
+
+  test("gives the same ticket id a different address for each caller", () => {
+    const id = ticketIdFor("intake:shared-token", "HELP-4821");
+
+    expect(ticketAddress(id, "intake:shared-token")).not.toBe(
+      ticketAddress(id, "vercel:prj_other")
+    );
+  });
+
+  test("does not put the caller's id in the address", () => {
+    expect(ticketAddress("a".repeat(32), "vercel:prj_secret")).not.toContain(
+      "prj_secret"
     );
   });
 });

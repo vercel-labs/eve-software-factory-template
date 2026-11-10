@@ -208,7 +208,9 @@ const duplicateKey = (index: number): string => `duplicate_${index}`;
  * @remarks
  * Label and duplicate questions are keyed by position, never by the label
  * name or issue title, so repository-controlled text can't collide with a
- * core question's key.
+ * core question's key. Label names and descriptions appear in the question
+ * text because only people with triage rights on the repository can write
+ * them; issue titles, which anyone can write, do not.
  */
 export const buildTriageQuestions = (
   labels: readonly RepoLabel[],
@@ -228,7 +230,10 @@ export const buildTriageQuestions = (
   });
   candidates.slice(0, TRIAGE_LIMITS.candidates).forEach((candidate, index) => {
     questions[duplicateKey(index)] = {
-      instructions: `Does this work item report the same underlying problem or request as the existing issue #${candidate.number}, titled "${clip(candidate.title, TRIAGE_LIMITS.titleCharacters)}"? Answer yes only when resolving one would fully resolve the other.`,
+      // The candidate's title is in the state, not here. Anyone can file an
+      // issue, so a title is untrusted text, and a question's instructions
+      // are the one place the decision model takes direction from.
+      instructions: `Does the work item (title and body in the state) report the same underlying problem or request as the existing issue #${candidate.number}, listed at index ${index} of existing_issues in the state? Answer yes only when resolving one would fully resolve the other.`,
       type: "boolean",
     };
   });
@@ -303,6 +308,11 @@ export const triageWorkItem = async (
     signal: dependencies.signal,
     state: {
       body: clip(item.body, TRIAGE_LIMITS.bodyCharacters),
+      existing_issues: usedCandidates.map((candidate, index) => ({
+        index,
+        number: candidate.number,
+        title: clip(candidate.title, TRIAGE_LIMITS.titleCharacters),
+      })),
       title: clip(item.title, TRIAGE_LIMITS.titleCharacters),
     },
   });

@@ -1,5 +1,5 @@
 import type { GitHubChannelCredentials } from "eve/channels/github";
-import { FACTORY_REPO } from "../constants.js";
+import { FACTORY_BRANCH_PREFIX, FACTORY_REPO } from "../constants.js";
 
 const PROTECTED_BRANCHES = new Set(["main", "master"]);
 
@@ -49,16 +49,27 @@ export function validateRef(ref: string): string | null {
  * Returns the refusal reason, or null when the branch may be pushed.
  *
  * @remarks
- * {@link validateRef} plus the protected-branch rule: the factory delivers
- * pull requests, never direct pushes to the default branch.
+ * {@link validateRef} plus two rules about which branches are the factory's
+ * to write:
+ *
+ * - The branch must carry the factory's own prefix (`FACTORY_BRANCH_PREFIX`,
+ *   `factory/` by default). The factory delivers its work on branches it
+ *   created and never touches anyone else's, and this is what keeps a push
+ *   off `develop`, a release branch, `gh-pages`, or whatever a repository
+ *   calls its default branch.
+ * - `main` and `master` are refused by name regardless, so the rule still
+ *   holds for a deployment that set the prefix to nothing.
  */
 export function validateBranch(branch: string): string | null {
   const refusal = validateRef(branch);
   if (refusal) {
     return refusal;
   }
-  if (PROTECTED_BRANCHES.has(branch)) {
+  if (PROTECTED_BRANCHES.has(branch.toLowerCase())) {
     return `Direct pushes to ${branch} are not allowed. Push a feature branch and open a pull request.`;
+  }
+  if (!branch.startsWith(FACTORY_BRANCH_PREFIX)) {
+    return `"${branch}" is not one of the factory's own branches. Push a branch named ${FACTORY_BRANCH_PREFIX}<type>-<short-slug>.`;
   }
   return null;
 }

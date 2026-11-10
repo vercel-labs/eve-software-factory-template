@@ -79,6 +79,49 @@ export function stampAutonomous(
 }
 
 /**
+ * Auth attribute narrowing what an unattended run is for.
+ *
+ * @remarks
+ * Its one value today is {@link SUMMARY_SCOPE}. A run without the attribute
+ * is an ordinary unattended run.
+ */
+export const SCOPE_ATTRIBUTE = "factoryScope";
+
+/** Scope of a run dispatched to summarize a pull request someone opened. */
+export const SUMMARY_SCOPE = "summary";
+
+/**
+ * Rewrites a channel auth into the summary-only principal for a pull
+ * request.
+ *
+ * @remarks
+ * A pull request can be opened by anyone, and its title, description, and
+ * diff are what the run reads, so this is the dispatch with the least
+ * trustworthy input the factory has. The run is therefore the unattended
+ * principal narrowed further: the approval policies let it read and post
+ * on that one pull request, and deny it everything else, the stations
+ * included. Text in a pull request can make it write a bad summary; it
+ * cannot make it push a branch or close an issue.
+ */
+export function stampSummary(
+  auth: SessionAuthContext,
+  pullRequest: number
+): SessionAuthContext {
+  const autonomous = stampAutonomous(auth, pullRequest);
+  return {
+    ...autonomous,
+    attributes: { ...autonomous.attributes, [SCOPE_ATTRIBUTE]: SUMMARY_SCOPE },
+  };
+}
+
+/** Whether the session is a summary-only run (see {@link stampSummary}). */
+export function isSummaryOnly(auth: SessionAuthContext | null): boolean {
+  return (
+    isAutonomous(auth) && auth?.attributes[SCOPE_ATTRIBUTE] === SUMMARY_SCOPE
+  );
+}
+
+/**
  * Auth attribute carrying the intake API ticket an unattended run was
  * dispatched for.
  */

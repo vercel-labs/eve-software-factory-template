@@ -136,17 +136,42 @@ describe("parseGitNetwork: refusals", () => {
 });
 
 describe("validateRef and validateBranch", () => {
-  test("plain branch names pass both", () => {
-    for (const name of ["factory/bug-x", "feature_1", "release-1.2", "a"]) {
+  test("plain branch names pass the shape check", () => {
+    for (const name of [
+      "factory/bug-x",
+      "feature_1",
+      "release-1.2",
+      "a",
+      "main",
+    ]) {
       expect(validateRef(name)).toBeNull();
-      expect(validateBranch(name)).toBeNull();
     }
   });
 
-  test("the default branch passes the shape check and fails the push check", () => {
+  test("only the factory's own branches may be pushed", () => {
+    expect(validateBranch("factory/bug-x")).toBeNull();
+    expect(validateBranch("factory/feature-add-export.v2")).toBeNull();
+    for (const name of [
+      "develop",
+      "production",
+      "release/1.0",
+      "gh-pages",
+      "feature/login",
+      "factory",
+      "my-factory/x",
+      "Factory/x",
+    ]) {
+      expect(validateBranch(name)).toMatch(
+        /not one of the factory's own branches/
+      );
+    }
+  });
+
+  test("the default branch passes the shape check and fails the push check, in any letter case", () => {
     expect(validateRef("main")).toBeNull();
-    expect(validateBranch("main")).toMatch(/not allowed/);
-    expect(validateBranch("master")).toMatch(/not allowed/);
+    for (const name of ["main", "master", "Main", "MASTER"]) {
+      expect(validateBranch(name)).toMatch(/not allowed/);
+    }
   });
 
   test.each([
@@ -172,5 +197,28 @@ describe("validateRef and validateBranch", () => {
   ])("%j is refused by both", (name) => {
     expect(validateRef(name)).not.toBeNull();
     expect(validateBranch(name)).not.toBeNull();
+  });
+});
+
+describe("parseGitNetwork: a push stays on the factory's branches", () => {
+  test.each([
+    ["develop"],
+    ["production"],
+    ["release/1.0"],
+    ["gh-pages"],
+    ["feature/login"],
+  ])("push to %s is refused before it reaches a sandbox", (branch) => {
+    expect(refusalOf("push", "origin", branch)).toMatch(
+      /not one of the factory's own branches/
+    );
+  });
+
+  test("reading those branches is still allowed", () => {
+    for (const branch of ["develop", "release/1.0", "main"]) {
+      expect(parseGitNetwork(["fetch", "origin", branch]).ok).toBe(true);
+      expect(parseGitNetwork(["pull", "--ff-only", "origin", branch]).ok).toBe(
+        true
+      );
+    }
   });
 });

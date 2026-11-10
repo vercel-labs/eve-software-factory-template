@@ -129,8 +129,8 @@ describe("parseGh: writes are classified by what they can do", () => {
         "issue",
         "comment",
         "https://github.com/acme/widgets/issues/56",
-        "--body-file",
-        "note.md"
+        "--body",
+        "note"
       )
     ).toEqual({ kind: "comment", thread: 56 });
   });
@@ -579,5 +579,331 @@ describe("bodiesToFiles", () => {
         files: [],
       });
     }
+  });
+});
+
+describe("parseGh: what the adversarial review found", () => {
+  describe("a single-valued flag is accepted once, because gh honours the last one", () => {
+    test.each([
+      [
+        [
+          "api",
+          "repos/acme/widgets/pulls/5/merge",
+          "--method",
+          "GET",
+          "--method",
+          "PUT",
+        ],
+      ],
+      [
+        [
+          "api",
+          "repos/acme/widgets/git/refs/heads/x",
+          "-X",
+          "GET",
+          "-X",
+          "DELETE",
+        ],
+      ],
+      [
+        [
+          "api",
+          "repos/acme/widgets/pulls/5/merge",
+          "--method=GET",
+          "-X",
+          "PUT",
+        ],
+      ],
+      [["api", "repos/acme/widgets/issues/1", "-X", "GET", "--method=PATCH"]],
+    ])("%j is refused: the method is given twice", (argv) => {
+      expect(refusalOf(...argv)).toMatch(/pass --method once/);
+    });
+
+    test.each([
+      [
+        [
+          "pr",
+          "create",
+          "--draft",
+          "--head",
+          "factory/x",
+          "--head",
+          "main",
+          "--title",
+          "T",
+          "--body",
+          "B",
+        ],
+        "head",
+      ],
+      [
+        [
+          "pr",
+          "create",
+          "--draft",
+          "--head",
+          "factory/x",
+          "--base",
+          "a",
+          "--base",
+          "b",
+          "--title",
+          "T",
+          "--body",
+          "B",
+        ],
+        "base",
+      ],
+      [["issue", "comment", "12", "--body", "one", "--body", "two"], "body"],
+      [["issue", "close", "12", "--comment", "a", "--comment", "b"], "comment"],
+      [
+        ["issue", "list", "--search", "a", "--search", "repo:other/x"],
+        "search",
+      ],
+      [
+        [
+          "pr",
+          "create",
+          "--draft",
+          "--draft",
+          "--head",
+          "factory/x",
+          "--title",
+          "T",
+          "--body",
+          "B",
+        ],
+        "draft",
+      ],
+      [["issue", "edit", "12", "--title", "a", "--title", "b"], "title"],
+    ])("%j is refused: --%s is given twice", (argv, flag) => {
+      expect(refusalOf(...argv)).toBe(
+        `gh ${argv.slice(0, 2).join(" ")}: pass --${flag} once.`
+      );
+    });
+
+    test("flags whose values gh adds together may repeat", () => {
+      expect(
+        effectOf(
+          "issue",
+          "edit",
+          "12",
+          "--add-label",
+          "bug",
+          "--add-label",
+          "area: auth",
+          "--remove-label",
+          "triage"
+        )
+      ).toEqual({ kind: "label" });
+      expect(
+        effectOf(
+          "api",
+          "repos/acme/widgets/pulls/1",
+          "-H",
+          "Accept: application/json",
+          "-H",
+          "X-GitHub-Api-Version: 2022-11-28"
+        )
+      ).toEqual({ kind: "read" });
+      expect(
+        effectOf("issue", "list", "--label", "bug", "--label", "p1")
+      ).toEqual({ kind: "read" });
+    });
+
+    test("every repeated header is still checked", () => {
+      expect(
+        refusalOf(
+          "api",
+          "repos/acme/widgets/pulls/1",
+          "-H",
+          "Accept: x",
+          "-H",
+          "Authorization: token t"
+        )
+      ).toMatch(/only Accept/);
+    });
+  });
+
+  describe("the command that runs is the command that was classified", () => {
+    test("a flag swallowed as another flag's value stays swallowed in the rewritten argv", () => {
+      const result = parseGh([
+        "pr",
+        "create",
+        "--title",
+        "--body",
+        "--draft",
+        "--head",
+        "factory/x",
+        "--body",
+        "real body",
+      ]);
+      if (!result.ok) {
+        throw new Error(result.reason);
+      }
+      // `--body` here is the title's value, so the only body is the last one.
+      expect(result.invocation.effect).toEqual({ kind: "draft-pr" });
+      expect(result.invocation.bodies).toEqual([
+        { at: 7, content: "real body", span: 2 },
+      ]);
+      expect(
+        bodiesToFiles(result.invocation, (index) => `/tmp/b${index}.md`)
+      ).toEqual({
+        args: [
+          "pr",
+          "create",
+          "--title",
+          "--body",
+          "--draft",
+          "--head",
+          "factory/x",
+          "--body-file",
+          "/tmp/b0.md",
+        ],
+        files: [{ content: "real body", path: "/tmp/b0.md" }],
+      });
+    });
+
+    test("a body that looks like a flag is content, not a flag", () => {
+      const result = parseGh([
+        "issue",
+        "comment",
+        "12",
+        "--body",
+        "--edit-last",
+      ]);
+      if (!result.ok) {
+        throw new Error(result.reason);
+      }
+      expect(bodiesToFiles(result.invocation, () => "/tmp/b.md")).toEqual({
+        args: ["issue", "comment", "12", "--body-file", "/tmp/b.md"],
+        files: [{ content: "--edit-last", path: "/tmp/b.md" }],
+      });
+    });
+
+    test("body positions survive --repo being stripped from in front of them", () => {
+      const result = parseGh([
+        "-R",
+        "acme/widgets",
+        "issue",
+        "comment",
+        "12",
+        "--body=hello",
+      ]);
+      if (!result.ok) {
+        throw new Error(result.reason);
+      }
+      expect(result.invocation.bodies).toEqual([
+        { at: 3, content: "hello", span: 1 },
+      ]);
+      expect(bodiesToFiles(result.invocation, () => "/tmp/b.md").args).toEqual([
+        "issue",
+        "comment",
+        "12",
+        "--body-file",
+        "/tmp/b.md",
+      ]);
+    });
+  });
+
+  describe("--body-file is not something a caller can pass", () => {
+    test.each([
+      [["issue", "comment", "12", "--body-file", "/proc/self/environ"]],
+      [["issue", "comment", "12", "-F", "/etc/passwd"]],
+      [["issue", "create", "--title", "T", "--body-file", "notes.md"]],
+      [
+        [
+          "pr",
+          "create",
+          "--draft",
+          "--head",
+          "factory/x",
+          "--title",
+          "T",
+          "--body-file=/tmp/x",
+        ],
+      ],
+      [["pr", "edit", "3", "-F", "x"]],
+    ])("%j is refused", (argv) => {
+      expect(refusalOf(...argv)).toMatch(/does not accept/);
+    });
+  });
+
+  describe("selectors cannot walk out of the repository", () => {
+    test.each([
+      [
+        ["run", "view", "1/../../../../repos/other/repo/actions/runs/5"],
+        /not a run id/,
+      ],
+      [["run", "view", "991", "--job", "../.."], /--job takes a number/],
+      [["run", "view", "991", "--attempt", "1;id"], /--attempt takes a number/],
+      [["release", "view", "../../.."], /not a release tag/],
+      [["workflow", "view", "../.."], /not a workflow id or file name/],
+      [["workflow", "view", "a/b.yml"], /not a workflow id or file name/],
+      [["repo", "view", "acme/widgets/extra"], /only works on acme\/widgets/],
+      [
+        ["repo", "view", "github.com/acme/widgets"],
+        /only works on acme\/widgets/,
+      ],
+      [
+        [
+          "issue",
+          "close",
+          "9",
+          "--duplicate-of",
+          "https://github.com/other/repo/issues/1",
+        ],
+        /is not on acme\/widgets/,
+      ],
+      [
+        ["issue", "close", "9", "--duplicate-of", "other/repo#1"],
+        /not an issue or pull request number/,
+      ],
+    ])("%j is refused", (argv, reason) => {
+      expect(refusalOf(...argv)).toMatch(reason);
+    });
+
+    test("the ordinary forms still work", () => {
+      expect(
+        effectOf("run", "view", "991", "--job", "55", "--log-failed")
+      ).toEqual({ kind: "read" });
+      expect(effectOf("run", "view")).toEqual({ kind: "read" });
+      expect(effectOf("release", "view", "v1.2.0")).toEqual({ kind: "read" });
+      expect(effectOf("workflow", "view", "ci.yml", "--yaml")).toEqual({
+        kind: "read",
+      });
+      expect(effectOf("workflow", "view", "12345")).toEqual({ kind: "read" });
+      expect(
+        effectOf("issue", "close", "9", "--duplicate-of", "7")
+      ).toMatchObject({ kind: "state" });
+    });
+  });
+
+  describe("searches stay inside the repository", () => {
+    test.each([
+      [["issue", "list", "--search", "repo:other/private secret"]],
+      [["issue", "list", "--search", "login REPO:other/private"]],
+      [["pr", "list", "-S", "org:other is:open"]],
+      [["pr", "list", "--search", "user:someone"]],
+      [["issue", "list", "--search", "(owner:other)"]],
+      [["issue", "list", "--search=-repo:acme/widgets"]],
+      [["label", "list", "--search", "repo:other/x"]],
+    ])("%j is refused", (argv) => {
+      expect(refusalOf(...argv)).toMatch(/Searches stay inside acme\/widgets/);
+    });
+
+    test("ordinary qualifiers and words are fine", () => {
+      for (const query of [
+        "login 500 in:title",
+        "is:open label:bug author:octocat",
+        "the repository: it broke",
+        "monorepo: build fails",
+        "password reset in:title,body",
+      ]) {
+        expect(
+          effectOf("issue", "list", "--state", "all", "--search", query)
+        ).toEqual({ kind: "read" });
+      }
+    });
   });
 });

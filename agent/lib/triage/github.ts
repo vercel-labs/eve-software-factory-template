@@ -274,17 +274,23 @@ export const runIdFromLink = (link: string | null): string | null => {
 };
 
 export interface CheckSummary {
+  /** Checks a person or a newer push cancelled: neither passing nor failing. */
+  readonly cancelled: number;
   readonly failing: readonly FailingCheck[];
   readonly pending: number;
   readonly total: number;
 }
+
+const NO_CHECKS = /no checks reported/i;
 
 /**
  * Reads a pull request's checks and picks out the failing ones.
  *
  * @remarks
  * `gh pr checks` exits non-zero whenever a check is failing or pending, so
- * the exit code says nothing here; the JSON is the answer.
+ * the exit code says nothing here; the JSON is the answer. A pull request
+ * with no checks at all is reported by `gh` as an error with no JSON, and
+ * comes back from here as an empty summary.
  */
 export const fetchChecks = async (
   gh: GhRunner,
@@ -299,6 +305,9 @@ export const fetchChecks = async (
   ]);
   const checks = parseJson(result.stdout);
   if (!Array.isArray(checks)) {
+    if (NO_CHECKS.test(result.stderr)) {
+      return { cancelled: 0, failing: [], pending: 0, total: 0 };
+    }
     throw fail(`Reading checks for #${pullRequest}`, result);
   }
   const rows = checks as readonly {
@@ -308,6 +317,7 @@ export const fetchChecks = async (
     workflow?: unknown;
   }[];
   return {
+    cancelled: rows.filter((check) => check.bucket === "cancel").length,
     failing: rows
       .filter((check) => check.bucket === "fail")
       .map((check) => {

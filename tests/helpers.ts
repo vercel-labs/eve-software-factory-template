@@ -2,6 +2,7 @@ import type { SessionAuthContext } from "eve/context";
 import {
   autonomousForTicket,
   stampAutonomous,
+  stampSummary,
   stampTrusted,
 } from "#lib/trust.js";
 
@@ -28,6 +29,8 @@ export const CALLERS = {
     principalId: "eve:app",
     principalType: "runtime",
   },
+  /** Run dispatched to summarize pull request #12, opened by anyone. */
+  summary: stampSummary(person, 12),
   /** Unattended run dispatched for an intake API ticket: no thread at all. */
   ticket: autonomousForTicket("a".repeat(32), "intake:shared-token"),
   /** A maintainer who mentioned the factory. */

@@ -8,7 +8,7 @@ import {
   type GitHubPullRequestEvent,
 } from "eve/channels/github";
 import { FACTORY_BRANCH_PREFIX, FACTORY_LABEL } from "../constants.js";
-import { stampAutonomous, stampTrusted } from "../trust.js";
+import { stampAutonomous, stampSummary, stampTrusted } from "../trust.js";
 import { mentionPattern, resolveBotName } from "./bot-name.js";
 
 /**
@@ -134,7 +134,8 @@ export const CI_FIX_TASK = [
   "A CI check suite failed on one of the factory's own pull requests. This run is unattended: nobody is watching to answer a question or approve an action, so never attempt an action that needs approval.",
   "Before anything else, read the pull request fresh. If the failure belongs to a commit that is no longer the branch head, stop without posting anything.",
   `Count your own earlier fix-attempt comments on this pull request. If there are already ${MAX_CI_FIX_ATTEMPTS}, do not attempt another fix. Post one comment saying the factory is pausing its automated CI fixes on this pull request to avoid looping, ${MAX_CI_FIX_ATTEMPTS} attempts have not turned the checks green, and further troubleshooting needs a person. Then stop.`,
-  "Otherwise, call diagnose_ci_failure with the pull request number. If it reports the checks as passing or still pending, stop without posting anything. If fix_with_code is false, post one comment naming the failing check, the cause it found (a flaky test, a runner or service failure, or a workflow configuration problem), and that changing the code won't fix it, so a person should rerun or repair the workflow. Then stop; that comment does not count as a fix attempt.",
+  "Otherwise, call diagnose_ci_failure with the pull request number. If nothing is failing by now (its status is passing, pending, cancelled, or no-checks), stop without posting anything. If fix_with_code is false, post one comment naming the failing check, the cause it found (a flaky test, a runner or service failure, or a workflow configuration problem), and that changing the code won't fix it, so a person should rerun or repair the workflow. Then stop; that comment does not count as a fix attempt.",
+  "If the status is failing-no-log, the failing checks' logs could not be read and the cause is unknown: never say the code is fine. Post one comment naming the failing checks with their links and saying their logs weren't readable from here, so a person should look. Then stop; that comment does not count as a fix attempt either.",
   "If fix_with_code is true, first post a short comment that a CI fix attempt is starting and what looks broken (future runs count these comments to know when to stop). Then run the fix as a revision: send the implementer the pull request's context, its branch name, the failing checks, and the log excerpt, and have the reviewer judge the updated branch. Pushing the fix re-runs the checks; do not open a new pull request.",
 ].join("\n\n");
 
@@ -144,7 +145,7 @@ export const CI_FIX_TASK = [
  * when this runs; the repo itself is checked out into the sandbox.
  */
 export const PR_SUMMARY_TASK = [
-  "A pull request was just opened. Post one comment that helps reviewers get oriented.",
+  "A pull request was just opened. Write one comment that helps reviewers get oriented, and make it your reply: it is posted on the pull request for you. This run can read the pull request and comment on it, and nothing else, so don't triage it, label it, or start any station.",
   "Open with a short paragraph saying what the PR does and why, grounded in its title, description, and diff. Never guess at intent the diff doesn't show.",
   "Then add a markdown table breaking down the changed files: the file path, the kind of change (added, modified, removed, renamed), and what changed in one short phrase. For a very large PR, list the files that carry the substance and roll the rest into a final count row.",
   "Close with one line pointing reviewers at where to start. This comment is a summary, not a review: don't approve, request changes, or ask the author for anything.",
@@ -230,14 +231,26 @@ export const onIssue = async (
 };
 
 /**
- * A pull request opened by a person: dispatches an untrusted run scoped to
- * one summary comment. Bot-opened pull requests, the factory's own included,
- * are skipped.
+ * A pull request opened by a person: dispatches a summary-only run. Bot-opened
+ * pull requests, the factory's own included, are skipped.
+ *
+ * @remarks
+ * Deliberately not gated on who opened it: orienting reviewers on an outside
+ * contributor's pull request is the point. That makes the pull request's
+ * text the least trustworthy input the factory reads, so the run it starts
+ * is the narrowest one there is (`stampSummary`): it can read and comment
+ * on that pull request, and nothing else, whatever the text says.
  */
 export const onPullRequest = (
   ctx: GitHubInboundContext,
   pullRequest: GitHubPullRequestEvent
 ): GitHubInboundResult =>
   pullRequest.action === "opened" && ctx.sender.type !== "Bot"
-    ? { auth: defaultGitHubAuth(ctx), context: [PR_SUMMARY_TASK] }
+    ? {
+        auth: stampSummary(
+          defaultGitHubAuth(ctx),
+          pullRequest.pullRequestNumber
+        ),
+        context: [PR_SUMMARY_TASK],
+      }
     : null;

@@ -164,6 +164,74 @@ describe("the orchestrator's gh tool", () => {
   });
 });
 
+describe("closing an issue never closes a pull request", () => {
+  const closing = (lookup: {
+    exitCode?: number;
+    stderr?: string;
+    stdout?: string;
+  }) => {
+    const commands: string[] = [];
+    const sandbox: LeaseSandbox = {
+      name: "sbx_state",
+      run: async ({ command }) => {
+        commands.push(command);
+        const answer = command.includes("'api'")
+          ? lookup
+          : { stdout: "closed" };
+        return {
+          exitCode: answer.exitCode ?? 0,
+          stderr: answer.stderr ?? "",
+          stdout: answer.stdout ?? "",
+        };
+      },
+      setNetworkPolicy: async () => undefined,
+      writeTextFile: async () => undefined,
+    };
+    const tool = ghTool({
+      environment: {} as never,
+      lease: { mint: async () => "ghs_test_token_0123456789abcdefghij" },
+      mode: "full",
+    }) as unknown as Tool;
+    const ctx = { getSandbox: async () => sandbox } as never;
+    return { commands, ctx, tool };
+  };
+
+  test("an issue is looked up first, then closed", async () => {
+    const { commands, ctx, tool } = closing({ stdout: "false\n" });
+    await tool.execute(
+      { args: ["issue", "close", "40", "--reason", "not planned"] },
+      ctx
+    );
+    expect(commands).toEqual([
+      "/usr/bin/gh 'api' 'repos/{owner}/{repo}/issues/40' '--jq' 'has(\"pull_request\")'",
+      "/usr/bin/gh 'issue' 'close' '40' '--reason' 'not planned'",
+    ]);
+  });
+
+  test("a pull request number is refused, and nothing is closed", async () => {
+    const { commands, ctx, tool } = closing({ stdout: "true\n" });
+    await expect(
+      tool.execute({ args: ["issue", "close", "34"] }, ctx)
+    ).rejects.toThrow(/#34 is a pull request, not an issue/);
+    await expect(
+      tool.execute({ args: ["issue", "reopen", "34"] }, ctx)
+    ).rejects.toThrow(/#34 is a pull request/);
+    expect(commands.every((command) => command.includes("'api'"))).toBe(true);
+  });
+
+  test.each([
+    ["the lookup fails", { exitCode: 1, stderr: "HTTP 404: Not Found" }],
+    ["the lookup answers something unexpected", { stdout: "null" }],
+    ["the lookup answers nothing", { stdout: "" }],
+  ])("when %s, nothing is closed", async (_name, lookup) => {
+    const { commands, ctx, tool } = closing(lookup);
+    await expect(
+      tool.execute({ args: ["issue", "close", "40"] }, ctx)
+    ).rejects.toThrow(/Could not confirm that #40 is an issue/);
+    expect(commands).toHaveLength(1);
+  });
+});
+
 describe("a station's gh tool", () => {
   test("runs reads", async () => {
     const h = harness({ stdout: "diff" });
@@ -222,7 +290,7 @@ describe("the implementer's git tool", () => {
     expect(h.commands[0]).toContain(
       "push 'https://github.com/acme/widgets.git' 'refs/heads/factory/bug-x:refs/heads/factory/bug-x'"
     );
-    expect(h.scopes[0]).toEqual(["contents:write", "workflows:write"]);
+    expect(h.scopes[0]).toEqual(["contents:write"]);
   });
 
   test("denies a push to the default branch for every caller, with the reason", async () => {

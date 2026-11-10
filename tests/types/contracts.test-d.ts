@@ -1,5 +1,6 @@
 import { describe, expectTypeOf, test } from "vitest";
 import type {
+  BodyArgument,
   GhEffect,
   GhInvocation,
   GhParseResult,
@@ -47,9 +48,10 @@ describe("gh allowlist contracts", () => {
     >().toBeNever();
   });
 
-  test("an invocation carries its args, command, and effect, all read-only", () => {
+  test("an invocation carries its args, body positions, command, and effect, all read-only", () => {
     expectTypeOf<GhInvocation>().toEqualTypeOf<{
       readonly args: readonly string[];
+      readonly bodies: readonly BodyArgument[];
       readonly command: string;
       readonly effect: Exclude<GhEffect, { kind: "forbidden" }>;
     }>();

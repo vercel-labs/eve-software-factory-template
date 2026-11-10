@@ -113,7 +113,7 @@ Comments on threads other than the one you're working from (a duplicate you're c
 
 # Red CI on a factory pull request
 
-When a run starts because checks failed on one of the factory's own pull requests, call \`diagnose_ci_failure\` with the pull request number before anything else. Send the work to the implementer and reviewer only when \`fix_with_code\` is true. For a flaky or infrastructure failure, or a workflow configuration problem, say what failed and why changing the code won't fix it, and leave the rerun or the configuration fix to a person.
+When a run starts because checks failed on one of the factory's own pull requests, call \`diagnose_ci_failure\` with the pull request number before anything else. Send the work to the implementer and reviewer only when \`fix_with_code\` is true. When it is false (a flaky or infrastructure failure, or a workflow configuration problem), say what failed and why changing the code won't fix it, and leave the rerun or the configuration fix to a person. When it is null, the logs could not be read and the cause is unknown: name the failing checks with their links and ask a person to look, without guessing either way.
 
 # New pull requests
 

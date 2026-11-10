@@ -19,6 +19,8 @@ import { cloneCommand } from "#lib/github/repo-sandbox.js";
  * network is involved.
  */
 const hasGit = spawnSync("git", ["--version"]).status === 0;
+// CI sets this, so a runner without git fails the suite instead of skipping.
+const required = process.env.FACTORY_REQUIRE_CLI_TESTS === "1";
 
 let root = "";
 let remote = "";
@@ -103,6 +105,12 @@ afterAll(() => {
   if (root !== "") {
     rmSync(root, { force: true, recursive: true });
   }
+});
+
+describe.runIf(required)("the CLI contract tests are required here", () => {
+  test("git is installed", () => {
+    expect(hasGit).toBe(true);
+  });
 });
 
 describe.skipIf(!hasGit)("the git tool's commands, run for real", () => {

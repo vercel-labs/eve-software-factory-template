@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { ghPolicy } from "#lib/github/approval.js";
+import { ghPolicy, stationPolicy } from "#lib/github/approval.js";
 import {
   CI_FIX_TASK,
   FACTORY_INTAKE_TASK,
@@ -14,6 +14,7 @@ import {
   AUTONOMOUS_PRINCIPAL,
   intakeIssueNumber,
   isAutonomous,
+  isSummaryOnly,
   isTrusted,
 } from "#lib/trust.js";
 import { approvalContext, outcome } from "../helpers.js";
@@ -354,14 +355,48 @@ describe("onPullRequest: the summary comment", () => {
   const pullRequest = (action: string) =>
     ({ action, headSha: "abc", pullRequestNumber: 34, raw: {} }) as never;
 
-  test("a pull request opened by a person dispatches an untrusted run", () => {
+  test("a pull request opened by anyone dispatches a summary-only run on that pull request", () => {
     const result = onPullRequest(context().ctx, pullRequest("opened"));
     expect(result?.context).toEqual([PR_SUMMARY_TASK]);
+    expect(isSummaryOnly(result?.auth ?? null)).toBe(true);
     expect(isTrusted(result?.auth ?? null)).toBe(false);
-    expect(isAutonomous(result?.auth ?? null)).toBe(false);
-    expect(can(result?.auth, "pr", "comment", "34", "--body", "Summary")).toBe(
-      "user-approval"
+    expect(intakeIssueNumber(result?.auth ?? null)).toBe(34);
+    expect(result?.auth?.principalId).toBe(AUTONOMOUS_PRINCIPAL);
+  });
+
+  test("whatever the pull request says, that run can only read and comment on it", () => {
+    const auth = onPullRequest(context().ctx, pullRequest("opened"))?.auth;
+    expect(can(auth, "pr", "diff", "34")).toBe("not-applicable");
+    expect(can(auth, "pr", "comment", "34", "--body", "Summary")).toBe(
+      "not-applicable"
     );
+    expect(can(auth, "pr", "comment", "35", "--body", "x")).toBe("denied");
+    expect(can(auth, "issue", "close", "1")).toBe("denied");
+    expect(can(auth, "issue", "edit", "34", "--add-label", "bug")).toBe(
+      "denied"
+    );
+    expect(
+      can(
+        auth,
+        "pr",
+        "create",
+        "--draft",
+        "--head",
+        "factory/x",
+        "--title",
+        "T",
+        "--body",
+        "B"
+      )
+    ).toBe("denied");
+    expect(can(auth, "pr", "ready", "34")).toBe("denied");
+    expect(
+      outcome(
+        stationPolicy(
+          approvalContext(auth as never, { message: "implement this" })
+        )
+      )
+    ).toBe("denied");
   });
 
   test("bot-opened pull requests and other actions dispatch nothing", () => {

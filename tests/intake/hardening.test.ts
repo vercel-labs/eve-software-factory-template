@@ -200,7 +200,8 @@ describe("signed callbacks", () => {
           turnId: "turn_0",
         },
         "a reply that must not be sent for a failed turn"
-      )
+      ),
+      () => new Date("2026-11-11T00:00:00.000Z")
     );
     expect(sent).toBe(true);
     expect(calls).toHaveLength(1);
@@ -210,6 +211,7 @@ describe("signed callbacks", () => {
     expect(JSON.parse(call?.body ?? "{}")).toEqual({
       error: { code: "REACTION_FAILED", id: "err_1" },
       result: null,
+      sentAt: "2026-11-11T00:00:00.000Z",
       sessionId: "wrun_test",
       status: "failed",
       ticketId: "a".repeat(32),

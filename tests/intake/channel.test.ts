@@ -25,6 +25,8 @@ import {
 
 /** The shared secret `vitest.config.ts` configures for the suite. */
 const TOKEN = "test-intake-token-0123456789abcdef";
+/** The principal the shared-token authenticator resolves to. */
+const CALLER = "intake:shared-token";
 const ORIGIN = "https://factory.test";
 const TICKETS_PATH = "/intake/v1/tickets";
 const TICKET_PATH = "/intake/v1/tickets/:ticketId";
@@ -465,6 +467,7 @@ describe("POST /intake/v1/tickets: callback URLs", () => {
       "FACTORY_INTAKE_CALLBACK_HOSTS",
       "other.example.com, hooks.example.com"
     );
+    vi.stubEnv("FACTORY_INTAKE_CALLBACK_SECRET", "callback-secret-for-tests");
     const callbackUrl = "https://hooks.example.com/factory?ticket=4821";
 
     const { dispatches, response } = await submitTicket({
@@ -476,6 +479,20 @@ describe("POST /intake/v1/tickets: callback URLs", () => {
     expect(onlyDispatch(dispatches).options.state?.callbackUrl).toBe(
       callbackUrl
     );
+  });
+
+  test("refuses a callback URL the deployment could never call: no signing secret is configured", async () => {
+    vi.stubEnv("FACTORY_INTAKE_CALLBACK_HOSTS", "hooks.example.com");
+    vi.stubEnv("FACTORY_INTAKE_CALLBACK_SECRET", "");
+
+    const { dispatches, json, response } = await submitTicket({
+      ...TICKET,
+      callbackUrl: "https://hooks.example.com/factory",
+    });
+
+    expect(response.status).toBe(400);
+    expect(json).toEqual({ code: "callback_not_configured", ok: false });
+    expect(dispatches).toHaveLength(0);
   });
 
   test("records no callback URL for a ticket that did not ask for one", async () => {
@@ -518,7 +535,7 @@ describe("POST /intake/v1/tickets: dispatch", () => {
     const { dispatches, json } = await submitTicket(TICKET);
 
     expect(onlyDispatch(dispatches).address).toBe(
-      ticketAddress(json.ticketId as string)
+      ticketAddress(json.ticketId as string, CALLER)
     );
   });
 
@@ -721,8 +738,8 @@ describe("POST /intake/v1/tickets: idempotency", () => {
     expect(second.json.ticketId).not.toBe(first.json.ticketId);
     expect(second.json.sessionId).not.toBe(first.json.sessionId);
     expect(context.dispatches.map((dispatch) => dispatch.address)).toEqual([
-      ticketAddress(first.json.ticketId as string),
-      ticketAddress(second.json.ticketId as string),
+      ticketAddress(first.json.ticketId as string, CALLER),
+      ticketAddress(second.json.ticketId as string, CALLER),
     ]);
   });
 
@@ -933,7 +950,7 @@ const ID = "0123456789abcdef0123456789abcdef";
 const readStatus = async (commits: readonly (readonly Fact[])[]) => {
   const context = harness({ ticketId: ID });
   const { reads, session } = fakeSession("wrun_known", commits);
-  context.owners.set(ticketAddress(ID), session);
+  context.owners.set(ticketAddress(ID, CALLER), session);
   const response = await status.handler(get(ID), context.args);
   return { ...context, json: await jsonOf(response), reads, response };
 };
@@ -952,13 +969,27 @@ describe("GET /intake/v1/tickets/:ticketId", () => {
     }
   );
 
+  test("a ticket another caller submitted is not found, even with the right id and a valid credential", async () => {
+    const context = harness({ ticketId: ID });
+    const { reads, session } = fakeSession("wrun_theirs", STREAMS.completed);
+    // The same ticket id, filed under a different verified caller.
+    context.owners.set(ticketAddress(ID, "vercel:another-project"), session);
+
+    const response = await status.handler(get(ID), context.args);
+
+    expect(response.status).toBe(404);
+    expect(await jsonOf(response)).toEqual({ code: "not_found", ok: false });
+    expect(context.resolved).toEqual([ticketAddress(ID, CALLER)]);
+    expect(reads).toEqual([]);
+  });
+
   test.each([
     ["no authorization header", null],
     ["a wrong bearer token", "not-the-token"],
   ])("answers 401 for %s without resolving anything", async (_case, token) => {
     const context = harness({ ticketId: ID });
     const { reads, session } = fakeSession("wrun_known");
-    context.owners.set(ticketAddress(ID), session);
+    context.owners.set(ticketAddress(ID, CALLER), session);
 
     const response = await status.handler(get(ID, token), context.args);
 
@@ -973,7 +1004,7 @@ describe("GET /intake/v1/tickets/:ticketId", () => {
     ["uppercase", ID.toUpperCase()],
     ["not hex", `${ID.slice(1)}g`],
     ["a UUID with dashes", "01234567-89ab-cdef-0123-456789abcdef"],
-    ["a full address", ticketAddress(ID)],
+    ["a full address", ticketAddress(ID, CALLER)],
     ["a session id", "wrun_known"],
     ["a path traversal", `../../${ID}`],
     ["an id with a trailing newline", `${ID}\n`],
@@ -1008,7 +1039,7 @@ describe("GET /intake/v1/tickets/:ticketId", () => {
 
     expect(response.status).toBe(404);
     expect(await jsonOf(response)).toEqual({ code: "not_found", ok: false });
-    expect(context.resolved).toEqual([ticketAddress(ID)]);
+    expect(context.resolved).toEqual([ticketAddress(ID, CALLER)]);
   });
 
   test("reports a ticket whose session has recorded nothing as queued", async () => {
@@ -1031,7 +1062,7 @@ describe("GET /intake/v1/tickets/:ticketId", () => {
   test("resolves the session through the ticket's address, never a raw session id", async () => {
     const { resolved } = await readStatus([]);
 
-    expect(resolved).toEqual([ticketAddress(ID)]);
+    expect(resolved).toEqual([ticketAddress(ID, CALLER)]);
   });
 
   test("reads the recorded history without following the live stream", async () => {

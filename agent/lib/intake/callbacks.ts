@@ -87,15 +87,18 @@ export const sessionEndedCallback = (
  * turn, and a lost callback must not. `GET /intake/v1/tickets/:ticketId`
  * stays the source of truth. Callbacks are only sent when
  * `FACTORY_INTAKE_CALLBACK_SECRET` is set, so a receiver can always verify
- * the `x-factory-signature` header (hex HMAC-SHA256 of the body). Redirects
- * are refused: the URL was checked against the allowlist, and wherever a
- * redirect points was not.
+ * the `x-factory-signature` header (hex HMAC-SHA256 of the body). The body
+ * carries `sentAt`, inside what is signed, so a receiver can refuse a
+ * captured callback replayed later, and the `idempotency-key` header lets it
+ * drop a repeat of one it already handled. Redirects are refused: the URL
+ * was checked against the allowlist, and wherever a redirect points was not.
  *
  * @returns Whether a callback was sent and accepted by the network layer.
  */
 export const postCallback = async (
   state: IntakeState,
-  callback: IntakeCallback
+  callback: IntakeCallback,
+  now: () => Date = () => new Date()
 ): Promise<boolean> => {
   const secret = process.env.FACTORY_INTAKE_CALLBACK_SECRET;
   if (state.callbackUrl === null || !secret) {
@@ -104,6 +107,7 @@ export const postCallback = async (
   const body = JSON.stringify({
     ticketId: state.ticketId,
     ...callback.payload,
+    sentAt: now().toISOString(),
   });
   try {
     await fetch(state.callbackUrl, {

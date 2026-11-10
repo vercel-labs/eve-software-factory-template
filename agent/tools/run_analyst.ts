@@ -1,5 +1,6 @@
 import { defineWorkflowTool } from "eve/tools";
 import { z } from "zod";
+import { stationPolicy } from "../lib/github/approval.js";
 import { stationOutput } from "../lib/stations/result.js";
 import { ANALYST_OUTPUT_SCHEMA } from "../lib/stations/schemas.js";
 
@@ -12,6 +13,7 @@ import { ANALYST_OUTPUT_SCHEMA } from "../lib/stations/schemas.js";
  * - Named `run_analyst`, not `analyst`: the compiler rejects a tool and a local subagent with the same public name.
  */
 export default defineWorkflowTool({
+  approval: stationPolicy,
   description:
     "Analyze a classified work item against the real repository checkout and produce an " +
     "implementation plan: problem statement, approach, ordered steps, affected files, " +

@@ -26,7 +26,8 @@ import { mintInstallationToken } from "./git-remote.js";
  *
  * The token itself is minted per lease and scoped twice: to the factory
  * repository alone, and to the permissions that class of command needs
- * ({@link TOKEN_SCOPES}). The scope is the backstop behind the argv
+ * ({@link TOKEN_SCOPES}). A scope never widens on its own: see
+ * {@link mintScopedToken}. The scope is the backstop behind the argv
  * allowlist in `cli.ts`: a station can run arbitrary code in its sandbox, so
  * whatever it might do with a lease is bounded by what the leased token can
  * do. No scope outside `repo-push` can write repository contents, which is
@@ -50,11 +51,13 @@ const CI_READS = ["actions:read", "checks:read", "statuses:read"] as const;
  * - `repo-read`: stations reading issues, pull requests, and CI.
  * - `repo-triage`: the orchestrator's `gh`: issues and pull requests, with
  *   repository contents read-only, so this token cannot merge or push.
- * - `repo-push`: a station pushing its feature branch. `workflows:write`
- *   lets a change touch `.github/workflows` when the app was granted it.
+ * - `repo-push`: a station pushing its feature branch. It cannot change
+ *   workflow files unless {@link WORKFLOW_CHANGES_ENV} is set: a pushed
+ *   workflow runs with the repository's secrets, so that permission is
+ *   something a deployer turns on, not something a branch push comes with.
  */
 export const TOKEN_SCOPES: Readonly<Record<TokenScope, ScopePermissions>> = {
-  "repo-push": { optional: ["workflows:write"], required: ["contents:write"] },
+  "repo-push": { optional: [], required: ["contents:write"] },
   "repo-read": {
     optional: CI_READS,
     required: ["contents:read", "issues:read", "pull_requests:read"],
@@ -63,6 +66,20 @@ export const TOKEN_SCOPES: Readonly<Record<TokenScope, ScopePermissions>> = {
     optional: CI_READS,
     required: ["contents:read", "issues:write", "pull_requests:write"],
   },
+};
+
+/** Set to `1` to let the implementer's push change `.github/workflows`. */
+export const WORKFLOW_CHANGES_ENV = "FACTORY_ALLOW_WORKFLOW_CHANGES";
+
+/**
+ * The permissions to request for `scope` right now: the table's, plus
+ * `workflows:write` on a push when the deployer opted in.
+ */
+export const permissionsFor = (scope: TokenScope): ScopePermissions => {
+  const base = TOKEN_SCOPES[scope];
+  return scope === "repo-push" && process.env[WORKFLOW_CHANGES_ENV] === "1"
+    ? { optional: ["workflows:write"], required: base.required }
+    : base;
 };
 
 export type TokenMinter = (
@@ -122,8 +139,27 @@ export const resetTokenScopeMemo = (): void => {
   resolvedScopes.clear();
 };
 
-const strictScopes = (): boolean =>
-  process.env.FACTORY_STRICT_TOKEN_SCOPES === "1";
+/**
+ * How far below a scope's own permissions a token may fall when the
+ * connector refuses to narrow, from the `FACTORY_TOKEN_FALLBACK` setting.
+ *
+ * - unset or `none` (the default): never. A scope gets its permissions or
+ *   the command fails.
+ * - `repository`: every permission the app holds, still limited to the
+ *   factory repository.
+ * - `installation`: that, and then the connector's plain installation token
+ *   (every permission, every repository the installation covers).
+ */
+export type TokenFallback = "none" | "repository" | "installation";
+
+export const TOKEN_FALLBACK_ENV = "FACTORY_TOKEN_FALLBACK";
+
+export const tokenFallback = (): TokenFallback => {
+  const setting = process.env[TOKEN_FALLBACK_ENV]?.trim().toLowerCase();
+  return setting === "repository" || setting === "installation"
+    ? setting
+    : "none";
+};
 
 type Rung = ResolvedScope["permissions"];
 
@@ -133,11 +169,11 @@ const warnIfWidened = (scope: TokenScope, rung: Rung): void => {
     return;
   }
   console.warn(
-    `GitHub token for scope "${scope}" could not be narrowed to [${TOKEN_SCOPES[scope].required.join(", ")}]; using ${
+    `GitHub token for scope "${scope}" could not be narrowed to [${permissionsFor(scope).required.join(", ")}]; using ${
       rung === null
         ? "the app's full permissions on the factory repository"
         : "the connector's unscoped installation token"
-    }. Check the GitHub App's permissions, or set FACTORY_STRICT_TOKEN_SCOPES=1 to fail instead.`
+    }, because ${TOKEN_FALLBACK_ENV} allows it. Check the GitHub App's permissions.`
   );
 };
 
@@ -153,7 +189,7 @@ export interface MintDependencies {
 }
 
 /**
- * Mints a token for `scope`, narrowing as far as the installation allows.
+ * Mints a token for `scope`.
  *
  * @remarks
  * GitHub refuses a token request that names a permission the installation
@@ -161,14 +197,22 @@ export interface MintDependencies {
  * takes the first rung that holds:
  *
  * 1. the scope's required and optional permissions, on the factory repository;
- * 2. the required permissions alone;
- * 3. every permission the app holds, still limited to the factory repository;
- * 4. the connector's plain installation token.
+ * 2. the required permissions alone.
  *
- * Rungs 3 and 4 are wider than the scope asks for, and each says so in the
- * logs when it is used: a factory that stops working over a hardening step
- * is the worse failure, but it should never widen silently. Set
- * `FACTORY_STRICT_TOKEN_SCOPES=1` to stop at rung 2 and fail instead.
+ * Both rungs are within the scope, and by default the ladder ends there: if
+ * neither holds, the command fails with a message that says what to check.
+ * The scope is the backstop behind the argv allowlist, and a backstop that
+ * quietly widens when something goes wrong, including something transient,
+ * is not one.
+ *
+ * A deployer whose installation cannot be narrowed can opt into wider
+ * tokens with `FACTORY_TOKEN_FALLBACK` (see {@link TokenFallback}). Each use
+ * of a wider rung is logged.
+ *
+ * The rung that worked is remembered so a refusal is paid once, not on every
+ * lease. A remembered rung that stops working is forgotten and the ladder is
+ * walked again from the top; a rung below the first is also re-examined
+ * after {@link SCOPE_DOWNGRADE_TTL_MS}.
  */
 export const mintScopedToken = async (
   scope: TokenScope,
@@ -181,38 +225,42 @@ export const mintScopedToken = async (
   const installationToken =
     dependencies.installationToken ??
     (dependencies.mint ? undefined : channelInstallationToken);
-  const { optional, required } = TOKEN_SCOPES[scope];
+  const { optional, required } = permissionsFor(scope);
 
-  const request = (rung: Rung): Promise<string> => {
-    if (rung === "installation") {
-      if (!installationToken) {
-        throw new Error("No installation token source is configured.");
-      }
-      return installationToken();
+  const request = async (rung: Rung): Promise<string> => {
+    const token =
+      rung === "installation"
+        ? await (installationToken ?? missingInstallationToken)()
+        : await mint(rung);
+    if (!token) {
+      throw new Error("The connector returned an empty token.");
     }
-    return mint(rung);
+    return token;
   };
 
   const remembered = resolvedScopes.get(scope);
   if (remembered && remembered.expiresAt > now()) {
-    return await request(remembered.permissions);
+    try {
+      return await request(remembered.permissions);
+    } catch {
+      // What worked before no longer does (a permission was removed, say).
+      // Forget it and find out afresh what the installation grants.
+      resolvedScopes.delete(scope);
+    }
   }
 
-  const ladder: Rung[] = [[...required, ...optional], required];
-  if (!strictScopes()) {
-    ladder.push(
-      null,
-      ...(installationToken ? (["installation"] as const) : [])
-    );
-  }
+  const fallback = tokenFallback();
+  const ladder: Rung[] = [
+    [...required, ...optional],
+    ...(optional.length > 0 ? [required] : []),
+    ...(fallback === "none" ? [] : [null]),
+    ...(fallback === "installation" ? (["installation"] as const) : []),
+  ];
   let lastError: unknown;
   for (const [index, rung] of ladder.entries()) {
     try {
       // biome-ignore lint/performance/noAwaitInLoops: each rung is only tried when the one above it was refused
       const token = await request(rung);
-      if (!token) {
-        throw new Error("The connector returned an empty token.");
-      }
       warnIfWidened(scope, rung);
       resolvedScopes.set(scope, {
         expiresAt:
@@ -227,10 +275,13 @@ export const mintScopedToken = async (
     }
   }
   throw new Error(
-    `Could not mint a GitHub token for scope "${scope}". Check that the GitHub connector's app is installed on the factory repository with the permissions the factory needs.`,
+    `Could not mint a GitHub token for scope "${scope}" with permissions [${required.join(", ")}]. Check that the GitHub connector's app is installed on the factory repository and holds those permissions. If the installation cannot issue narrowed tokens at all, ${TOKEN_FALLBACK_ENV}=repository allows a wider one.`,
     { cause: lastError }
   );
 };
+
+const missingInstallationToken = (): Promise<string> =>
+  Promise.reject(new Error("No installation token source is configured."));
 
 const basic = (secret: string): string =>
   `Basic ${Buffer.from(`x-access-token:${secret}`).toString("base64")}`;
@@ -349,18 +400,23 @@ const serialized = <T>(key: string, work: () => Promise<T>): Promise<T> => {
  */
 const clean = (
   text: string,
-  secrets: readonly string[]
+  secrets: readonly string[],
+  keep: "head" | "tail"
 ): { text: string; truncated: boolean } => {
   let cleaned = text;
   for (const secret of secrets) {
     cleaned = cleaned.replaceAll(secret, "[redacted]");
   }
-  return cleaned.length > MAX_OUTPUT_CHARACTERS
-    ? {
-        text: `${cleaned.slice(0, MAX_OUTPUT_CHARACTERS)}\n[output truncated]`,
-        truncated: true,
-      }
-    : { text: cleaned, truncated: false };
+  if (cleaned.length <= MAX_OUTPUT_CHARACTERS) {
+    return { text: cleaned, truncated: false };
+  }
+  return {
+    text:
+      keep === "tail"
+        ? `[earlier output truncated]\n${cleaned.slice(-MAX_OUTPUT_CHARACTERS)}`
+        : `${cleaned.slice(0, MAX_OUTPUT_CHARACTERS)}\n[output truncated]`,
+    truncated: true,
+  };
 };
 
 export interface LeaseDependencies extends MintDependencies {
@@ -371,6 +427,11 @@ export interface LeaseDependencies extends MintDependencies {
 interface LeasedCommand {
   readonly command: string;
   readonly env: Record<string, string>;
+  /**
+   * Which end of oversized output survives. Most output is read from the
+   * top; a log is read from the bottom, where the failure is.
+   */
+  readonly keep?: "head" | "tail";
   /** Omit for a command with no time limit of its own (the initial clone). */
   readonly timeoutMs?: number;
   readonly workingDirectory?: string;
@@ -405,8 +466,9 @@ const withLease = (
           : {}),
       });
       const secrets = [token, basic(token)];
-      const stdout = clean(String(result.stdout ?? ""), secrets);
-      const stderr = clean(String(result.stderr ?? ""), secrets);
+      const keep = leased.keep ?? "head";
+      const stdout = clean(String(result.stdout ?? ""), secrets, keep);
+      const stderr = clean(String(result.stderr ?? ""), secrets, keep);
       return {
         exitCode: result.exitCode,
         stderr: stderr.text,
@@ -450,6 +512,7 @@ export const runGh = (
         GH_CONFIG_DIR: `/tmp/${placeholder}-config`,
         GH_TOKEN: placeholder,
       },
+      keep: invocation.command === "run view" ? "tail" : "head",
       timeoutMs: GH_TIMEOUT_MS,
     };
   });

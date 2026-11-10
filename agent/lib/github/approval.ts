@@ -4,6 +4,7 @@ import {
   intakeIssueNumber,
   isAutonomous,
   isScheduleAppAuth,
+  isSummaryOnly,
   isTrusted,
 } from "../trust.js";
 import { type GhEffect, parseGh } from "./cli.js";
@@ -20,7 +21,9 @@ import { type GhEffect, parseGh } from "./cli.js";
  *
  * - **Unattended** (the constructed autonomous principal: label intake, CI
  *   fixes, API intake). Nobody is watching, so nothing ever waits for
- *   approval; a call either runs or is denied.
+ *   approval; a call either runs or is denied. A **summary-only** run (a
+ *   pull request someone opened) is the same principal narrowed further: it
+ *   reads, and comments on that one pull request.
  * - **Trusted** (a channel stamped the caller, or a schedule turn). Routine,
  *   reversible writes run without a prompt.
  * - **Everyone else** (the dev TUI, an unstamped session). Writes wait for a
@@ -33,6 +36,9 @@ import { type GhEffect, parseGh } from "./cli.js";
 type Auth = SessionAuthContext | null;
 
 const denied = (reason: string): ApprovalStatus => ({ reason, type: "denied" });
+
+const SUMMARY_ONLY =
+  "This run only reads the pull request and posts its summary on that pull request.";
 
 /**
  * Policy for routine, reversible repository writes: creating an issue,
@@ -79,6 +85,9 @@ export function commentDecision(
  * routine-write policy.
  */
 export function labelDecision(auth: Auth): ApprovalStatus {
+  if (isSummaryOnly(auth)) {
+    return denied(SUMMARY_ONLY);
+  }
   return isAutonomous(auth) ? "not-applicable" : writeDecision(auth);
 }
 
@@ -97,6 +106,39 @@ export function shipDecision(auth: Auth): ApprovalStatus {
 }
 
 /**
+ * What a summary-only run may do: read, and comment on the pull request it
+ * was dispatched for.
+ */
+function summaryDecision(effect: GhEffect, auth: Auth): ApprovalStatus {
+  if (effect.kind === "read") {
+    return "not-applicable";
+  }
+  if (effect.kind === "forbidden") {
+    return denied(effect.reason);
+  }
+  return effect.kind === "comment" &&
+    effect.thread !== null &&
+    effect.thread === intakeIssueNumber(auth)
+    ? "not-applicable"
+    : denied(SUMMARY_ONLY);
+}
+
+/**
+ * Approval policy for the tools that start a station.
+ *
+ * @remarks
+ * A station run costs real work and, for the implementer, ends in a pushed
+ * branch, so the one caller class with no business building anything is
+ * denied here: a summary-only run. Everyone else is unaffected; what their
+ * run may go on to do with the result is still decided call by call.
+ */
+export function stationPolicy(ctx: ApprovalContext): ApprovalStatus {
+  return isSummaryOnly(ctx.session.auth.current)
+    ? denied(SUMMARY_ONLY)
+    : "not-applicable";
+}
+
+/**
  * Maps the effect of a `gh` invocation and the caller's trust class to an
  * approval outcome.
  *
@@ -108,6 +150,9 @@ export function shipDecision(auth: Auth): ApprovalStatus {
  *   comment scope can be sidestepped through `--comment`.
  */
 export function ghEffectDecision(effect: GhEffect, auth: Auth): ApprovalStatus {
+  if (isSummaryOnly(auth)) {
+    return summaryDecision(effect, auth);
+  }
   switch (effect.kind) {
     case "read":
     case "draft-pr":

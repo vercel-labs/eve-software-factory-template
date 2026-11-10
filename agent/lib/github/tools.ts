@@ -2,7 +2,7 @@ import type { SandboxEnvironment } from "eve/sandbox";
 import type { VercelSandboxSession } from "eve/sandbox/vercel";
 import { defineTool, toolOutput } from "eve/tools";
 import { z } from "zod";
-import { FACTORY_REPO } from "../constants.js";
+import { FACTORY_BRANCH_PREFIX, FACTORY_REPO } from "../constants.js";
 import { ghPolicy, readOnlyGhPolicy } from "./approval.js";
 import { MAX_GH_ARGS, parseGh } from "./cli.js";
 import {
@@ -14,6 +14,7 @@ import { REPO_DIR } from "./git-remote.js";
 import {
   type CliResult,
   type LeaseDependencies,
+  type LeaseSandbox,
   runGh,
   runGitNetwork,
 } from "./lease.js";
@@ -69,6 +70,46 @@ const cliOutput = (result: CliResult) => {
   );
 };
 
+/**
+ * Refuses to close or reopen a pull request through `gh issue close` or
+ * `gh issue reopen`.
+ *
+ * @remarks
+ * To GitHub a pull request is also an issue, and `gh issue close 34`
+ * closes pull request #34. Closing an issue is reversible triage that runs
+ * for every caller; closing a pull request is a write that an unattended
+ * run is denied. The argv alone can't tell the two apart, so this asks
+ * GitHub which one the number is before the command runs, and fails closed
+ * when it can't find out.
+ */
+const assertIsIssue = async (
+  sandbox: LeaseSandbox,
+  thread: number | null,
+  lease: LeaseDependencies | undefined
+): Promise<void> => {
+  const lookup = parseGh([
+    "api",
+    `repos/{owner}/{repo}/issues/${thread ?? ""}`,
+    "--jq",
+    'has("pull_request")',
+  ]);
+  if (thread === null || !lookup.ok) {
+    throw new Error("Pass the issue by its number.");
+  }
+  const result = await runGh(sandbox, lookup.invocation, "repo-read", lease);
+  const answer = result.stdout.trim();
+  if (result.exitCode !== 0 || !(answer === "true" || answer === "false")) {
+    throw new Error(
+      `Could not confirm that #${thread} is an issue, so it was left alone: ${result.stderr.trim().slice(0, 300) || "gh gave no answer"}`
+    );
+  }
+  if (answer === "true") {
+    throw new Error(
+      `#${thread} is a pull request, not an issue. Closing or reopening a pull request is ["pr","close","${thread}"] or ["pr","reopen","${thread}"].`
+    );
+  }
+};
+
 const GH_READ_EXAMPLES =
   '["issue","view","12","--comments"], ["pr","view","34","--json","title,body,headRefName,isDraft"], ["pr","diff","34"], ["pr","checks","34"], ["run","view","991","--log-failed"], ["label","list"]';
 
@@ -101,6 +142,13 @@ export const ghTool = (options: {
         throw new Error("This tool only runs read-only gh commands.");
       }
       const sandbox = await ctx.getSandbox(options.environment);
+      if (invocation.effect.kind === "state") {
+        await assertIsIssue(
+          sandbox,
+          invocation.effect.commentThread,
+          options.lease
+        );
+      }
       return await runGh(
         sandbox,
         invocation,
@@ -156,7 +204,7 @@ export const gitTool = (options: {
     },
     description: `Run a git command that talks to GitHub, in the ${REPO_DIR} checkout of ${FACTORY_REPO}: ${allowed.join(", ")}. The remote is always the factory repository; write it as origin. ${
       options.push
-        ? 'Examples: ["fetch","origin","factory/bug-fix-login"] then check the branch out in the shell with git checkout factory/bug-fix-login; ["push","origin","factory/bug-fix-login"] to deliver your committed branch. Pushing to main or master, force pushes, and deleting branches are refused.'
+        ? `Examples: ["fetch","origin","factory/bug-fix-login"] then check the branch out in the shell with git checkout factory/bug-fix-login; ["push","origin","factory/bug-fix-login"] to deliver your committed branch. Only branches that start with ${FACTORY_BRANCH_PREFIX} can be pushed; force pushes and deleting branches are refused.`
         : 'Example: ["fetch","origin","factory/bug-fix-login"], then check the branch out in the shell with git checkout factory/bug-fix-login.'
     } Everything local (status, diff, checkout, commit, log) is plain git in the shell, not this tool.`,
     async execute({ args }, ctx) {
