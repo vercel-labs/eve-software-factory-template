@@ -2,15 +2,15 @@ import { randomUUID } from "node:crypto";
 import { getToken } from "@vercel/connect";
 import type { SandboxNetworkPolicy, SandboxNetworkRule } from "eve/sandbox";
 import { factoryRepo } from "../constants.js";
-import { sanitizeCommandOutput } from "./bootstrap-diagnostics.js";
 import {
   bodiesToFiles,
   GH_ENVIRONMENT,
   type GhInvocation,
   ghCommandLine,
 } from "./cli.js";
-import { GITHUB_CONNECTOR } from "./credentials.js";
+import { GITHUB_CONNECTOR, githubCredentials } from "./credentials.js";
 import type { GitInvocation } from "./git-cli.js";
+import { mintInstallationToken } from "./git-remote.js";
 
 /**
  * Credential leases: how the real `gh` and `git` binaries in a sandbox get
@@ -87,58 +87,140 @@ export const connectMinter: TokenMinter = (permissions) =>
     subject: { type: "app" },
   });
 
+/**
+ * The connector's own installation token, exactly as the GitHub channel
+ * uses it: every permission the app holds, on every repository the
+ * installation covers.
+ */
+export const channelInstallationToken = (): Promise<string> =>
+  mintInstallationToken(githubCredentials);
+
+/**
+ * How long a narrower-than-ideal result is remembered before the full
+ * permission set is tried again.
+ *
+ * @remarks
+ * A refusal is usually permanent (the installation lacks a permission), so
+ * remembering it saves a failed request per lease. But a network blip looks
+ * the same from here, and remembering that forever would quietly leave a
+ * scope wider than it needs to be until the process restarts.
+ */
+export const SCOPE_DOWNGRADE_TTL_MS = 10 * 60 * 1000;
+
+interface ResolvedScope {
+  /** Epoch milliseconds after which the full set is tried again. */
+  readonly expiresAt: number;
+  /** The permission list that worked, `null` for repository-scoped only, or `"installation"`. */
+  readonly permissions: readonly string[] | null | "installation";
+}
+
 /** Which permission set last worked for each scope, so a miss is paid once. */
-const resolvedPermissions = new Map<TokenScope, readonly string[] | null>();
+const resolvedScopes = new Map<TokenScope, ResolvedScope>();
 
 /** Clears the per-scope memo. For tests. */
 export const resetTokenScopeMemo = (): void => {
-  resolvedPermissions.clear();
+  resolvedScopes.clear();
 };
 
 const strictScopes = (): boolean =>
   process.env.FACTORY_STRICT_TOKEN_SCOPES === "1";
+
+type Rung = ResolvedScope["permissions"];
+
+/** Says so in the logs when a token is wider than its scope asked for. */
+const warnIfWidened = (scope: TokenScope, rung: Rung): void => {
+  if (rung !== null && rung !== "installation") {
+    return;
+  }
+  console.warn(
+    `GitHub token for scope "${scope}" could not be narrowed to [${TOKEN_SCOPES[scope].required.join(", ")}]; using ${
+      rung === null
+        ? "the app's full permissions on the factory repository"
+        : "the connector's unscoped installation token"
+    }. Check the GitHub App's permissions, or set FACTORY_STRICT_TOKEN_SCOPES=1 to fail instead.`
+  );
+};
+
+export interface MintDependencies {
+  /**
+   * Last-resort token source, used when the connector refuses every scoped
+   * request. Defaults to {@link channelInstallationToken} in the app.
+   */
+  readonly installationToken?: () => Promise<string>;
+  readonly mint?: TokenMinter;
+  /** Clock, for the downgrade memo. Injected by tests. */
+  readonly now?: () => number;
+}
 
 /**
  * Mints a token for `scope`, narrowing as far as the installation allows.
  *
  * @remarks
  * GitHub refuses a token request that names a permission the installation
- * wasn't granted, and installations differ, so this tries the full set for
- * the scope, then the required set alone. If the installation rejects even
- * that, the token falls back to every permission the app holds (still
- * limited to the factory repository) and says so in the logs, because a
- * factory that stops working over an optional hardening step is the worse
- * failure. Set `FACTORY_STRICT_TOKEN_SCOPES=1` to refuse that last fallback.
+ * wasn't granted, and installations differ, so this walks down a ladder and
+ * takes the first rung that holds:
+ *
+ * 1. the scope's required and optional permissions, on the factory repository;
+ * 2. the required permissions alone;
+ * 3. every permission the app holds, still limited to the factory repository;
+ * 4. the connector's plain installation token.
+ *
+ * Rungs 3 and 4 are wider than the scope asks for, and each says so in the
+ * logs when it is used: a factory that stops working over a hardening step
+ * is the worse failure, but it should never widen silently. Set
+ * `FACTORY_STRICT_TOKEN_SCOPES=1` to stop at rung 2 and fail instead.
  */
 export const mintScopedToken = async (
   scope: TokenScope,
-  mint: TokenMinter = connectMinter
+  dependencies: MintDependencies = {}
 ): Promise<string> => {
-  if (resolvedPermissions.has(scope)) {
-    return await mint(resolvedPermissions.get(scope) ?? null);
-  }
+  const mint = dependencies.mint ?? connectMinter;
+  const now = dependencies.now ?? Date.now;
+  // An injected minter is a test's whole world: it gets no real fallback
+  // unless the test also provides one.
+  const installationToken =
+    dependencies.installationToken ??
+    (dependencies.mint ? undefined : channelInstallationToken);
   const { optional, required } = TOKEN_SCOPES[scope];
-  const attempts: (readonly string[] | null)[] = [
-    [...required, ...optional],
-    required,
-  ];
+
+  const request = (rung: Rung): Promise<string> => {
+    if (rung === "installation") {
+      if (!installationToken) {
+        throw new Error("No installation token source is configured.");
+      }
+      return installationToken();
+    }
+    return mint(rung);
+  };
+
+  const remembered = resolvedScopes.get(scope);
+  if (remembered && remembered.expiresAt > now()) {
+    return await request(remembered.permissions);
+  }
+
+  const ladder: Rung[] = [[...required, ...optional], required];
   if (!strictScopes()) {
-    attempts.push(null);
+    ladder.push(
+      null,
+      ...(installationToken ? (["installation"] as const) : [])
+    );
   }
   let lastError: unknown;
-  for (const permissions of attempts) {
+  for (const [index, rung] of ladder.entries()) {
     try {
-      // biome-ignore lint/performance/noAwaitInLoops: each attempt is only made when the one before it was refused
-      const token = await mint(permissions);
+      // biome-ignore lint/performance/noAwaitInLoops: each rung is only tried when the one above it was refused
+      const token = await request(rung);
       if (!token) {
-        throw new Error("Connect returned an empty token.");
+        throw new Error("The connector returned an empty token.");
       }
-      if (permissions === null) {
-        console.warn(
-          `GitHub token for scope "${scope}" could not be narrowed to [${required.join(", ")}]; using the app's full permissions on the factory repository. Check the GitHub App's permissions, or set FACTORY_STRICT_TOKEN_SCOPES=1 to fail instead.`
-        );
-      }
-      resolvedPermissions.set(scope, permissions);
+      warnIfWidened(scope, rung);
+      resolvedScopes.set(scope, {
+        expiresAt:
+          index === 0
+            ? Number.POSITIVE_INFINITY
+            : now() + SCOPE_DOWNGRADE_TTL_MS,
+        permissions: rung,
+      });
       return token;
     } catch (error) {
       lastError = error;
@@ -256,11 +338,20 @@ const serialized = <T>(key: string, work: () => Promise<T>): Promise<T> => {
   return next;
 };
 
+/**
+ * Removes the lease's own credential from command output and bounds it.
+ *
+ * @remarks
+ * The redaction is exact, not pattern-based. The secrets are known here, and
+ * the output is what an agent reads to do its job: a diff of authentication
+ * code or a CI log is full of lines that look like credentials to a pattern
+ * and are nothing of the kind.
+ */
 const clean = (
   text: string,
   secrets: readonly string[]
 ): { text: string; truncated: boolean } => {
-  let cleaned = sanitizeCommandOutput(text);
+  let cleaned = text;
   for (const secret of secrets) {
     cleaned = cleaned.replaceAll(secret, "[redacted]");
   }
@@ -272,16 +363,16 @@ const clean = (
     : { text: cleaned, truncated: false };
 };
 
-export interface LeaseDependencies {
+export interface LeaseDependencies extends MintDependencies {
   /** Makes the per-lease placeholder. Injected by tests. */
   readonly id?: () => string;
-  readonly mint?: TokenMinter;
 }
 
 interface LeasedCommand {
   readonly command: string;
   readonly env: Record<string, string>;
-  readonly timeoutMs: number;
+  /** Omit for a command with no time limit of its own (the initial clone). */
+  readonly timeoutMs?: number;
   readonly workingDirectory?: string;
 }
 
@@ -299,14 +390,16 @@ const withLease = (
 ): Promise<CliResult> =>
   serialized(sandbox.name, async () => {
     const placeholder = `factory-${(dependencies.id ?? randomUUID)()}`;
-    const token = await mintScopedToken(scope, dependencies.mint);
+    const token = await mintScopedToken(scope, dependencies);
     const leased = await build(placeholder);
     await sandbox.setNetworkPolicy(leasePolicy(kind, token, placeholder));
     try {
       const result = await sandbox.run({
         command: leased.command,
         env: leased.env,
-        signal: AbortSignal.timeout(leased.timeoutMs),
+        ...(leased.timeoutMs === undefined
+          ? {}
+          : { signal: AbortSignal.timeout(leased.timeoutMs) }),
         ...(leased.workingDirectory
           ? { workingDirectory: leased.workingDirectory }
           : {}),
@@ -411,3 +504,22 @@ export const runGitNetwork = (
       timeoutMs: GIT_TIMEOUT_MS,
     })
   );
+
+/**
+ * Runs a git command line the factory wrote itself (not one a model
+ * supplied) under a read-only lease. Used for a station's initial clone.
+ *
+ * @remarks
+ * Callers pass a fixed command, such as `cloneCommand(REMOTE_URL)`; nothing
+ * model-written may reach this function, since it does no validation of its
+ * own.
+ */
+export const runLeasedGitCommand = (
+  sandbox: LeaseSandbox,
+  commandLine: string,
+  dependencies: LeaseDependencies = {}
+): Promise<CliResult> =>
+  withLease(sandbox, "git", "repo-read", dependencies, (placeholder) => ({
+    command: commandLine,
+    env: gitEnvironment(placeholder),
+  }));

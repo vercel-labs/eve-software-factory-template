@@ -107,7 +107,9 @@ afterAll(() => {
 
 describe.skipIf(!hasGit)("the git tool's commands, run for real", () => {
   test("fetching a branch makes it available to a plain checkout in the shell", () => {
-    expect(() => git(checkout, "rev-parse", "--verify", "origin/factory/existing")).toThrow();
+    expect(() =>
+      git(checkout, "rev-parse", "--verify", "origin/factory/existing")
+    ).toThrow();
 
     const fetched = runTool("fetch", "origin", "factory/existing");
     expect(fetched.status).toBe(0);
@@ -117,22 +119,32 @@ describe.skipIf(!hasGit)("the git tool's commands, run for real", () => {
 
     // What the station's instructions say to do next, with no tool involved.
     git(checkout, "checkout", "-q", "factory/existing");
-    expect(git(checkout, "rev-parse", "--abbrev-ref", "HEAD")).toBe("factory/existing");
+    expect(git(checkout, "rev-parse", "--abbrev-ref", "HEAD")).toBe(
+      "factory/existing"
+    );
     expect(git(checkout, "log", "-1", "--format=%s")).toBe("existing work");
   });
 
   test("pushing a new feature branch creates exactly that branch on the remote", () => {
     git(checkout, "checkout", "-q", "-b", "factory/new-work", "origin/main");
     commit(checkout, "new.txt", "new work");
-    const before = git(remote, "for-each-ref", "--format=%(refname)").split("\n").sort();
+    const before = git(remote, "for-each-ref", "--format=%(refname)")
+      .split("\n")
+      .sort();
 
     const pushed = runTool("push", "origin", "factory/new-work");
     expect(pushed.status).toBe(0);
 
-    const after = git(remote, "for-each-ref", "--format=%(refname)").split("\n").sort();
+    const after = git(remote, "for-each-ref", "--format=%(refname)")
+      .split("\n")
+      .sort();
     expect(after).toEqual([...before, "refs/heads/factory/new-work"].sort());
-    expect(git(remote, "rev-parse", "factory/new-work")).toBe(git(checkout, "rev-parse", "HEAD"));
-    expect(git(remote, "rev-parse", "main")).toBe(git(checkout, "rev-parse", "origin/main"));
+    expect(git(remote, "rev-parse", "factory/new-work")).toBe(
+      git(checkout, "rev-parse", "HEAD")
+    );
+    expect(git(remote, "rev-parse", "main")).toBe(
+      git(checkout, "rev-parse", "origin/main")
+    );
   });
 
   test("after a push the checkout knows it is in sync, so git status tells the truth", () => {
@@ -164,7 +176,9 @@ describe.skipIf(!hasGit)("the git tool's commands, run for real", () => {
     git(checkout, "reset", "-q", "--hard", "origin/factory/new-work~1");
     const pulled = runTool("pull", "--ff-only", "origin", "factory/new-work");
     expect(pulled.status).toBe(0);
-    expect(git(checkout, "log", "-1", "--format=%s")).toBe("address review findings");
+    expect(git(checkout, "log", "-1", "--format=%s")).toBe(
+      "address review findings"
+    );
   });
 
   test("ls-remote lists the remote's branches", () => {
@@ -180,7 +194,9 @@ describe.skipIf(!hasGit)("the git tool's commands, run for real", () => {
     commit(seed, "upstream.txt", "someone else merged");
     git(seed, "push", "-q", "origin", "main");
     expect(runTool("fetch").status).toBe(0);
-    expect(git(checkout, "rev-parse", "origin/main")).toBe(git(remote, "rev-parse", "main"));
+    expect(git(checkout, "rev-parse", "origin/main")).toBe(
+      git(remote, "rev-parse", "main")
+    );
   });
 
   test("the default branch never moves, whatever the checkout's own remote config says", () => {

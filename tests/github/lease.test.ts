@@ -280,7 +280,7 @@ describe("runGh: bodies travel as files, never on the command line", () => {
       kind: "write",
       path: "/tmp/factory-lease-3-body-0.md",
     });
-    const run = steps[2];
+    const run = steps.at(2);
     expect(run?.kind === "run" && run.command).toBe(
       "/usr/bin/gh 'issue' 'comment' '12' '--body-file' '/tmp/factory-lease-3-body-0.md'; status=$?; rm -f '/tmp/factory-lease-3-body-0.md'; exit $status"
     );
@@ -349,7 +349,7 @@ describe("runGitNetwork", () => {
       kind: "policy",
       policy: leasePolicy("git", TOKEN, "factory-lease-4"),
     });
-    const run = steps[1];
+    const run = steps.at(1);
     const env = run?.kind === "run" ? run.env : {};
     expect(env).toEqual({
       GIT_CONFIG_COUNT: "4",
@@ -473,8 +473,8 @@ describe("token scopes", () => {
       requests.push(permissions);
       return TOKEN;
     };
-    await mintScopedToken("repo-triage", mint);
-    await mintScopedToken("repo-triage", mint);
+    await mintScopedToken("repo-triage", { mint });
+    await mintScopedToken("repo-triage", { mint });
     const full = [
       ...TOKEN_SCOPES["repo-triage"].required,
       ...TOKEN_SCOPES["repo-triage"].optional,
@@ -491,9 +491,9 @@ describe("token scopes", () => {
       }
       return TOKEN;
     };
-    expect(await mintScopedToken("repo-read", mint)).toBe(TOKEN);
+    expect(await mintScopedToken("repo-read", { mint })).toBe(TOKEN);
     expect(requests.at(-1)).toEqual(TOKEN_SCOPES["repo-read"].required);
-    await mintScopedToken("repo-read", mint);
+    await mintScopedToken("repo-read", { mint });
     expect(requests).toHaveLength(3);
     expect(requests.at(-1)).toEqual(TOKEN_SCOPES["repo-read"].required);
   });
@@ -506,7 +506,7 @@ describe("token scopes", () => {
       }
       return TOKEN;
     };
-    expect(await mintScopedToken("repo-triage", mint)).toBe(TOKEN);
+    expect(await mintScopedToken("repo-triage", { mint })).toBe(TOKEN);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toMatch(/could not be narrowed/);
   });
@@ -521,7 +521,7 @@ describe("token scopes", () => {
       }
       return TOKEN;
     };
-    await expect(mintScopedToken("repo-triage", mint)).rejects.toThrow(
+    await expect(mintScopedToken("repo-triage", { mint })).rejects.toThrow(
       /Could not mint a GitHub token/
     );
     expect(requests).not.toContain(null);
@@ -529,8 +529,8 @@ describe("token scopes", () => {
 
   test("an empty token is treated as a failure, not as a credential", async () => {
     vi.stubEnv("FACTORY_STRICT_TOKEN_SCOPES", "1");
-    await expect(mintScopedToken("repo-read", async () => "")).rejects.toThrow(
-      /Could not mint a GitHub token/
-    );
+    await expect(
+      mintScopedToken("repo-read", { mint: async () => "" })
+    ).rejects.toThrow(/Could not mint a GitHub token/);
   });
 });

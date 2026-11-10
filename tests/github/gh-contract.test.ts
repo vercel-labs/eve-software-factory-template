@@ -27,36 +27,41 @@ const helpFor = (command: string): string =>
     env: { ...process.env, GH_NO_UPDATE_NOTIFIER: "1", NO_COLOR: "1" },
   });
 
-describe.skipIf(!hasGh)("the gh allowlist matches the installed GitHub CLI", () => {
-  test.each(GH_COMMANDS.map((command) => [command]))(
-    "gh %s exists and has every flag the allowlist accepts",
-    (command) => {
-      const help = helpFor(command);
-      const missing = (GH_COMMAND_FLAGS[command] ?? []).filter(
-        (flag) => !new RegExp(`--${flag}\\b`).test(help)
-      );
-      expect(missing).toEqual([]);
-    }
-  );
+describe.skipIf(!hasGh)(
+  "the gh allowlist matches the installed GitHub CLI",
+  () => {
+    test.each(GH_COMMANDS.map((command) => [command]))(
+      "gh %s exists and has every flag the allowlist accepts",
+      (command) => {
+        const help = helpFor(command);
+        const missing = (GH_COMMAND_FLAGS[command] ?? []).filter(
+          (flag) => !new RegExp(`--${flag}\\b`).test(help)
+        );
+        expect(missing).toEqual([]);
+      }
+    );
 
-  test.each(GH_COMMANDS.map((command) => [command]))(
-    "gh %s uses the short spellings the allowlist accepts",
-    (command) => {
-      const help = helpFor(command);
-      const wrong = (GH_COMMAND_SHORT_FLAGS[command] ?? [])
-        .filter(([short, long]) => !new RegExp(`-${short}, --${long}\\b`).test(help))
-        .map(([short, long]) => `-${short}/--${long}`);
-      expect(wrong).toEqual([]);
-    }
-  );
+    test.each(GH_COMMANDS.map((command) => [command]))(
+      "gh %s uses the short spellings the allowlist accepts",
+      (command) => {
+        const help = helpFor(command);
+        const wrong = (GH_COMMAND_SHORT_FLAGS[command] ?? [])
+          .filter(
+            ([short, long]) => !new RegExp(`-${short}, --${long}\\b`).test(help)
+          )
+          .map(([short, long]) => `-${short}/--${long}`);
+        expect(wrong).toEqual([]);
+      }
+    );
 
-  test("every command with a repository context accepts the repository override the tool relies on", () => {
-    const withoutOverride = GH_COMMANDS.filter(
-      (command) => !(command === "api" || command.startsWith("repo "))
-    ).filter((command) => !/-R, --repo\b/.test(helpFor(command)));
-    expect(withoutOverride).toEqual([]);
-  });
-});
+    test("every command with a repository context accepts the repository override the tool relies on", () => {
+      const withoutOverride = GH_COMMANDS.filter(
+        (command) => !(command === "api" || command.startsWith("repo "))
+      ).filter((command) => !/-R, --repo\b/.test(helpFor(command)));
+      expect(withoutOverride).toEqual([]);
+    });
+  }
+);
 
 describe("the allowlist's flag views", () => {
   test("cover every command, and every short flag is one character", () => {

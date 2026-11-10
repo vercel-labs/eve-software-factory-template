@@ -158,7 +158,7 @@ describe("onComment: who can start a run by mentioning the factory", () => {
   });
 
   test("bots and the factory's own comments never dispatch", async () => {
-    const ctx = context().ctx;
+    const { ctx } = context();
     expect(
       await onComment(
         ctx,

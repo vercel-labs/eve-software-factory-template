@@ -337,7 +337,11 @@ describe("parseGh: repository pinning", () => {
       "acme/widgets",
     ]);
     const named = parseGh(["repo", "view", "acme/widgets"]);
-    expect(named.ok && named.invocation.args).toEqual(["repo", "view", "acme/widgets"]);
+    expect(named.ok && named.invocation.args).toEqual([
+      "repo",
+      "view",
+      "acme/widgets",
+    ]);
   });
 
   test.each([

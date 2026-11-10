@@ -312,27 +312,18 @@ describe("station output schemas: validation", () => {
       }
     });
 
-    const enumPaths = enumPathsOf(schema);
+    test.each(
+      enumPathsOf(schema).map((path) => [`$.${path.join(".")}`, path] as const)
+    )("rejects a value outside the enum at %s", (_where, path) => {
+      const sample = sampleFor(name);
 
-    test.runIf(enumPaths.length > 0)(
-      "rejects an output with a value outside an enum",
-      () => {
-        for (const path of enumPaths) {
-          const sample = sampleFor(name);
-
-          expect(
-            valid(withChange(sample, path, () => "not-a-listed-value")),
-            `enum at $.${path.join(".")}`
-          ).toBe(false);
-          expect(
-            valid(
-              withChange(sample, path, (value) => String(value).toUpperCase())
-            ),
-            `enum case at $.${path.join(".")}`
-          ).toBe(false);
-        }
-      }
-    );
+      expect(valid(withChange(sample, path, () => "not-a-listed-value"))).toBe(
+        false
+      );
+      expect(
+        valid(withChange(sample, path, (value) => String(value).toUpperCase()))
+      ).toBe(false);
+    });
 
     test("rejects an output missing any required key", () => {
       const required = schema.required ?? [];

@@ -394,7 +394,7 @@ describe("POST /intake/v1/tickets: validation", () => {
   test("measures the limit in bytes, not characters", async () => {
     const { args, dispatches } = harness();
     // Three bytes each in UTF-8: well under the limit in characters, over it in bytes.
-    const multibyte = "€".repeat(Math.ceil(MAX_TICKET_BYTES / 3) + 1);
+    const multibyte = "\u20ac".repeat(Math.ceil(MAX_TICKET_BYTES / 3) + 1);
 
     expect(multibyte.length).toBeLessThan(MAX_TICKET_BYTES);
     expect((await submit.handler(postRaw(multibyte), args)).status).toBe(413);

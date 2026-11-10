@@ -46,12 +46,12 @@ const harness = (
   return { commands, ctx, environment, lease, scopes };
 };
 
-type Tool = {
+interface Tool {
   approval: (ctx: never) => unknown;
   description: string;
   execute: (input: { args: string[] }, ctx: never) => Promise<unknown>;
   toModelOutput: (output: never) => unknown;
-};
+}
 
 beforeEach(() => {
   resetTokenScopeMemo();

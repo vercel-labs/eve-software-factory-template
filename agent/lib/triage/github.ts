@@ -23,10 +23,16 @@ const parseJson = (stdout: string): unknown => {
   }
 };
 
-const fail = (what: string, result: { exitCode: number; stderr: string }) =>
-  new Error(
-    `${what} failed (gh exit ${result.exitCode}): ${result.stderr.trim().slice(0, 500)}`
+const fail = (
+  what: string,
+  result: { exitCode: number; stderr: string; stdout: string }
+) => {
+  const detail =
+    result.stderr.trim() || result.stdout.trim() || "gh printed nothing";
+  return new Error(
+    `${what} failed (gh exit ${result.exitCode}): ${detail.slice(0, 500)}`
   );
+};
 
 export interface FetchedIssue extends WorkItem {
   readonly labels: readonly string[];
@@ -234,7 +240,9 @@ export const applyLabels = async (
   issue: { readonly labels: readonly string[]; readonly number: number },
   labels: readonly string[]
 ): Promise<string[]> => {
-  const missing = labels.filter((label) => !issue.labels.includes(label));
+  const missing = [...new Set(labels)].filter(
+    (label) => !issue.labels.includes(label)
+  );
   if (missing.length === 0) {
     return [];
   }
@@ -257,7 +265,7 @@ export interface FailingCheck {
   readonly workflow: string | null;
 }
 
-const RUN_ID_PATTERN = /\/actions\/runs\/(\d+)(?:\/|$)/;
+const RUN_ID_PATTERN = /\/actions\/runs\/(\d+)(?:[/?#]|$)/;
 
 /** Extracts the Actions run id from a check's details link, when it has one. */
 export const runIdFromLink = (link: string | null): string | null => {

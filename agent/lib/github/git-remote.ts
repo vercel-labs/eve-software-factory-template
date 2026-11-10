@@ -1,5 +1,4 @@
 import type { GitHubChannelCredentials } from "eve/channels/github";
-import type { SandboxNetworkPolicy } from "eve/sandbox";
 import { FACTORY_REPO } from "../constants.js";
 
 const PROTECTED_BRANCHES = new Set(["main", "master"]);
@@ -62,29 +61,6 @@ export function validateBranch(branch: string): string | null {
     return `Direct pushes to ${branch} are not allowed. Push a feature branch and open a pull request.`;
   }
   return null;
-}
-
-/**
- * Firewall policy that brokers the installation token onto egress to
- * github.com only, mirroring the shape eve's own channel checkout uses.
- *
- * @remarks
- * The token never enters the sandbox process; the firewall injects the header
- * on the way out. `"*": []` keeps general egress open so package installs and
- * test runs keep working while the policy is active.
- */
-export function brokerPolicy(installationToken: string): SandboxNetworkPolicy {
-  const authorization = `Basic ${Buffer.from(
-    `x-access-token:${installationToken}`
-  ).toString("base64")}`;
-  return {
-    allow: {
-      "*": [],
-      "github.com": [
-        { transform: [{ headers: { Authorization: authorization } }] },
-      ],
-    },
-  };
 }
 
 /**

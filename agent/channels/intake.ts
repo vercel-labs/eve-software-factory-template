@@ -19,24 +19,25 @@ import {
   turns,
 } from "eve/events";
 import {
+  type IntakeState,
+  interactionOpenedCallback,
+  postCallback,
+  sessionEndedCallback,
+  turnSettledCallback,
+} from "../lib/intake/callbacks.js";
+import {
   allowedCallback,
   MAX_TICKET_BYTES,
   publicError,
+  readLimitedText,
   renderTicket,
   secretMatches,
-  signCallback,
   TICKET_ID_PATTERN,
   ticketAddress,
   ticketIdFor,
   ticketSchema,
 } from "../lib/intake/ticket.js";
 import { autonomousForTicket } from "../lib/trust.js";
-
-/** Durable per-session channel state. Plain JSON only. */
-interface IntakeState {
-  callbackUrl: string | null;
-  ticketId: string;
-}
 
 /**
  * Shared-secret bearer auth for the intake API.
@@ -86,50 +87,8 @@ const INTAKE_TASK = [
   "Otherwise run the item through the pipeline and deliver the finished work as a draft pull request. End the run with a short message that links the pull request and says what was built.",
 ].join("\n\n");
 
-const CALLBACK_TIMEOUT_MS = 10_000;
-
 const json = (body: unknown, status: number): Response =>
   Response.json(body, { headers: { "cache-control": "no-store" }, status });
-
-/**
- * POSTs a signed status update to the ticket's callback URL, when it has one.
- *
- * @remarks
- * Never throws: an unhandled error in a channel event handler would fail the
- * turn, and a lost callback must not. `GET /intake/v1/tickets/:ticketId`
- * stays the source of truth. Callbacks are only sent when
- * `FACTORY_INTAKE_CALLBACK_SECRET` is set, so a receiver can always verify
- * the `x-factory-signature` header (hex HMAC-SHA256 of the body).
- */
-const postCallback = async (
-  state: IntakeState,
-  key: string,
-  payload: Record<string, unknown>
-): Promise<void> => {
-  const secret = process.env.FACTORY_INTAKE_CALLBACK_SECRET;
-  if (state.callbackUrl === null || !secret) {
-    return;
-  }
-  const body = JSON.stringify({ ticketId: state.ticketId, ...payload });
-  try {
-    await fetch(state.callbackUrl, {
-      body,
-      headers: {
-        "content-type": "application/json",
-        "idempotency-key": key,
-        "x-factory-signature": signCallback(body, secret),
-      },
-      method: "POST",
-      redirect: "error",
-      signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
-    });
-  } catch (error) {
-    console.warn("intake callback failed", {
-      error: error instanceof Error ? error.message : String(error),
-      key,
-    });
-  }
-};
 
 const replyText = (view: SessionView, turnId: string): string | null => {
   const text = reply(view, turnId)
@@ -170,42 +129,26 @@ export default defineChannel<IntakeState, { state: IntakeState }>({
   context: (state) => ({ state }),
   events: {
     async "interaction.opened"(event, ctx) {
-      const { interactionId, request } = event.data;
       await postCallback(
         ctx.channel.state,
-        `${ctx.session.id}:${interactionId}:opened`,
-        {
-          pending: {
-            interactionId,
-            kind: request.kind,
-            prompt: request.prompt,
-          },
-          sessionId: ctx.session.id,
-          status: "awaiting-input",
-        }
+        interactionOpenedCallback(ctx.session.id, event.data)
       );
     },
     async "session.ended"(event, ctx) {
-      if (event.data.outcome !== "failed") {
-        return;
+      const callback = sessionEndedCallback(ctx.session.id, event.data);
+      if (callback) {
+        await postCallback(ctx.channel.state, callback);
       }
-      await postCallback(ctx.channel.state, `${ctx.session.id}:ended`, {
-        error: publicError(event.data.error),
-        sessionId: ctx.session.id,
-        status: "failed",
-      });
     },
     async "turn.settled"(event, ctx) {
-      const { outcome, turnId, error } = event.data;
+      const { outcome, turnId } = event.data;
       await postCallback(
         ctx.channel.state,
-        `${ctx.session.id}:${turnId}:settled`,
-        {
-          error: publicError(error),
-          result: outcome === "completed" ? replyText(ctx.view, turnId) : null,
-          sessionId: ctx.session.id,
-          status: outcome,
-        }
+        turnSettledCallback(
+          ctx.session.id,
+          event.data,
+          outcome === "completed" ? replyText(ctx.view, turnId) : null
+        )
       );
     },
   },
@@ -215,8 +158,8 @@ export default defineChannel<IntakeState, { state: IntakeState }>({
       if (caller instanceof Response) {
         return caller;
       }
-      const raw = await request.text();
-      if (Buffer.byteLength(raw) > MAX_TICKET_BYTES) {
+      const raw = await readLimitedText(request, MAX_TICKET_BYTES);
+      if (raw === null) {
         return json({ code: "payload_too_large", ok: false }, 413);
       }
       let parsedJson: unknown;

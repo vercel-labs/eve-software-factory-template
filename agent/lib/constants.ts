@@ -29,8 +29,8 @@ export function requireEnv(name: string, example: string): string {
  * @remarks
  * Required at module load so a missing value fails discovery instead of
  * producing a factory with no target. Every surface reads this one constant:
- * the GitHub extension's default context, the station sandboxes' clone, and
- * the push URL.
+ * the `gh` tool's pinned repository, the scope of every leased token, the
+ * station sandboxes' clone, and the push URL.
  */
 export const FACTORY_REPO = requireEnv("FACTORY_REPO", "acme/widgets");
 

@@ -18,23 +18,39 @@ export const MIN_INTAKE_TOKEN_LENGTH = 32;
 
 export const TICKET_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point
+const SINGLE_LINE = /^[^\u0000-\u001f\u007f\u2028\u2029]*$/;
+
 /**
  * A work item submitted over HTTP. Strict: an unknown field is a 400, so a
  * caller finds out about a typo instead of having it silently dropped, and no
  * field can smuggle in something the handler never looked at.
+ *
+ * @remarks
+ * Every field except `body` is a single line. Each one is rendered on a line
+ * of its own in the session's first message, so a line break inside, say,
+ * `source` would let a submitter write what looks like another field (a
+ * requester without its "unverified" label).
  */
+const singleLine = (max: number) =>
+  z
+    .string()
+    .min(1)
+    .max(max)
+    .regex(SINGLE_LINE, "must be a single line with no control characters");
+
 export const ticketSchema = z.strictObject({
   body: z.string().min(1).max(20_000),
   callbackUrl: z
     .url({ protocol: /^https$/ })
     .max(2048)
     .optional(),
-  externalId: z.string().min(1).max(200).optional(),
-  labels: z.array(z.string().min(1).max(50)).max(20).optional(),
+  externalId: singleLine(200).optional(),
+  labels: z.array(singleLine(50)).max(20).optional(),
   priority: z.enum(TICKET_PRIORITIES).optional(),
-  requester: z.string().min(1).max(200).optional(),
-  source: z.string().min(1).max(100).optional(),
-  title: z.string().min(1).max(300),
+  requester: singleLine(200).optional(),
+  source: singleLine(100).optional(),
+  title: singleLine(300),
 });
 
 export type Ticket = z.infer<typeof ticketSchema>;
@@ -67,7 +83,10 @@ export const TICKET_ID_PATTERN = /^[0-9a-f]{32}$/;
  * With an `externalId` it is a digest of the verified caller and that id, so
  * the same caller resubmitting the same ticket lands on the same id (and the
  * same session), while two callers can never collide or guess each other's.
- * Without one it is random and every submission is a new ticket.
+ * The pair is hashed as JSON, not joined with a separator, so no choice of
+ * caller id and external id can be read back as a different pair.
+ * Without an `externalId` the id is random and every submission is a new
+ * ticket.
  */
 export const ticketIdFor = (
   callerId: string,
@@ -75,7 +94,9 @@ export const ticketIdFor = (
 ): string =>
   externalId === undefined
     ? crypto.randomUUID().replaceAll("-", "")
-    : sha256(`${callerId}\n${externalId}`).toString("hex").slice(0, 32);
+    : sha256(JSON.stringify([callerId, externalId]))
+        .toString("hex")
+        .slice(0, 32);
 
 /** The channel address a ticket's session lives at. */
 export const ticketAddress = (ticketId: string): string => `ticket:${ticketId}`;
@@ -105,7 +126,9 @@ export const renderTicket = (ticket: Ticket): string => {
  * @remarks
  * A caller-supplied URL the server will POST to is a request-forgery vector,
  * so callbacks only go to hosts the deployer listed in
- * `FACTORY_INTAKE_CALLBACK_HOSTS` (comma-separated, exact host match).
+ * `FACTORY_INTAKE_CALLBACK_HOSTS` (comma-separated). An entry is a host
+ * name, which allows any port on that host, or `host:port`, which allows
+ * that port only. Matching is exact: no wildcards and no subdomains.
  */
 export const allowedCallback = (
   url: string | undefined,
@@ -118,17 +141,18 @@ export const allowedCallback = (
     .split(",")
     .map((host) => host.trim().toLowerCase())
     .filter(Boolean);
-  let hostname: string;
+  let parsed: URL;
   try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
-      return null;
-    }
-    hostname = parsed.hostname.toLowerCase();
+    parsed = new URL(url);
   } catch {
     return null;
   }
-  return hosts.includes(hostname) ? url : null;
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+    return null;
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const withPort = `${hostname}:${parsed.port || "443"}`;
+  return hosts.includes(hostname) || hosts.includes(withPort) ? url : null;
 };
 
 /** Hex HMAC-SHA256 of a callback body, sent as `x-factory-signature`. */
@@ -180,4 +204,46 @@ export const publicError = (
     code: typeof code === "string" ? code : "RUN_FAILED",
     id: typeof id === "string" ? id : null,
   };
+};
+
+/**
+ * Reads a request body as text, giving up as soon as it exceeds `maxBytes`.
+ *
+ * @remarks
+ * `request.text()` would buffer whatever the caller sends before any size
+ * check could run. This refuses on a declared `content-length` over the
+ * limit without reading at all, and otherwise reads chunk by chunk and stops
+ * at the limit, so the bound holds for a caller that lies about the length
+ * or sends none.
+ *
+ * @returns The body, or null when it is larger than `maxBytes`.
+ */
+export const readLimitedText = async (
+  request: Request,
+  maxBytes: number
+): Promise<string | null> => {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    return null;
+  }
+  if (request.body === null) {
+    return "";
+  }
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    // biome-ignore lint/performance/noAwaitInLoops: a stream is read one chunk at a time
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    received += value.byteLength;
+    if (received > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 };

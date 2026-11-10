@@ -99,8 +99,8 @@ export const INTAKE_CALLER_ATTRIBUTE = "intakeCaller";
  * ticket id alone. Nothing in the request body reaches it, so a ticket can't
  * choose who its run acts as. It carries no intake issue number, which means
  * the approval policies give it no thread to comment on: an API run can read
- * the repository, apply labels, and open a draft pull request, and nothing
- * else.
+ * the repository, apply labels, close or reopen an issue, and open a draft
+ * pull request, and nothing else.
  */
 export function autonomousForTicket(
   ticketId: string,
