@@ -3,7 +3,12 @@ import type { VercelSandboxSession } from "eve/sandbox/vercel";
 import { defineTool } from "eve/tools";
 import { type BashToolInput, type BashToolOutput, bash } from "eve/tools/bash";
 import { FACTORY_BRANCH_PREFIX, FACTORY_REPO } from "../constants.js";
-import { bashPolicy } from "./approval.js";
+import {
+  bashPolicy,
+  GH_ONLY,
+  MAX_GH_STEPS,
+  shellAvailable,
+} from "./approval.js";
 import {
   type GhInvocation,
   MAX_GH_ARG_LENGTH,
@@ -49,8 +54,12 @@ import {
  * eve's `bash` so that works without a token ever entering the sandbox, and
  * so that what a command may change still depends on who is asking.
  *
- * Each command is sorted by `analyzeCommand` (`shell.ts`) and run one of
- * three ways:
+ * One class of run is the exception: an unattended run on the orchestrator
+ * has no shell at all, only whole `gh` commands that the runtime runs
+ * itself (`shellAvailable` in `approval.ts` says why).
+ *
+ * Otherwise, each command is sorted by `analyzeCommand` (`shell.ts`) and run
+ * one of three ways:
  *
  * 1. Nothing that names `gh` or a networked `git` command: eve's `bash`, as
  *    is.
@@ -74,8 +83,10 @@ import {
  * shell, and while it runs, its placeholder can be read there (the process
  * environment, a temp file name) by anything else the agent left running:
  * a command issued alongside it, or one started in the background earlier.
- * So the allowlist and the trust policy decide what a well-behaved run
- * does; for a run that has been taken over by its input, the limit is what
+ * So where the agent has a shell (a station, or an attended run on the
+ * orchestrator), the allowlist and the trust policy decide what a
+ * well-behaved run does; for a run that has been taken over by its input,
+ * the limit is what
  * the leased token can do (`repo-triage`: issues and pull requests, never
  * contents; `repo-push`: contents on the implementer). Queueing commands
  * would not change that, since a background process outlives its command.
@@ -86,13 +97,6 @@ type FactoryEnvironment = SandboxEnvironment<
   object | undefined,
   VercelSandboxSession
 >;
-
-/** The slice of a sandbox session the tool needs beyond the lease's own. */
-type ToolSandbox = LeaseSandbox & {
-  readonly readTextFile: (options: {
-    path: string;
-  }) => PromiseLike<string | null>;
-};
 
 /** Runs a command in the sandbox's shell and returns its final result. */
 type Shell = (
@@ -168,8 +172,39 @@ const assertIsIssue = async (
  * Parses one `gh` step against the allowlist, reading any `--body-file`
  * from the sandbox so the text becomes the invocation's body.
  */
+/**
+ * Reads a `--body-file` from the sandbox, never more than a body may hold.
+ *
+ * @remarks
+ * The path is whatever the agent wrote, so the read is bounded where it
+ * happens: `head` stops after one byte more than the limit, which is enough
+ * to tell a file that is too long from one that fits, and keeps a device
+ * file or a huge one from ever reaching the app runtime's memory.
+ */
+const readBodyFile = async (
+  sandbox: LeaseSandbox,
+  path: string
+): Promise<string> => {
+  const result = await sandbox.run({
+    command: `/usr/bin/head -c ${MAX_GH_ARG_LENGTH + 1} -- ${shellQuote(path)}`,
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(`--body-file: ${path} does not exist or cannot be read.`);
+  }
+  const text = String(result.stdout ?? "");
+  // `head` counts bytes, so the limit is checked in bytes too. Counting
+  // characters here would let a cut-off file through whenever it holds a
+  // character of more than one byte.
+  if (Buffer.byteLength(text, "utf8") > MAX_GH_ARG_LENGTH) {
+    throw new Error(
+      `--body-file: ${path} is longer than ${MAX_GH_ARG_LENGTH} bytes.`
+    );
+  }
+  return text;
+};
+
 const resolveStep = async (
-  sandbox: ToolSandbox,
+  sandbox: LeaseSandbox,
   step: GhStep
 ): Promise<GhInvocation> => {
   const inlined = inlineBodyFiles(step.argv);
@@ -179,16 +214,7 @@ const resolveStep = async (
   const argv = [...inlined.argv];
   for (const file of inlined.files) {
     // biome-ignore lint/performance/noAwaitInLoops: a command has one body file, rarely two
-    const text = await sandbox.readTextFile({ path: file.path });
-    if (text === null) {
-      throw new Error(`--body-file: ${file.path} does not exist.`);
-    }
-    if (text.length > MAX_GH_ARG_LENGTH) {
-      throw new Error(
-        `--body-file: ${file.path} is longer than ${MAX_GH_ARG_LENGTH} characters.`
-      );
-    }
-    argv[file.at] = text;
+    argv[file.at] = await readBodyFile(sandbox, file.path);
   }
   const parsed = parseGh(argv);
   if (!parsed.ok) {
@@ -208,41 +234,76 @@ const onlyReads = (steps: readonly GhStep[]): boolean =>
     return parsed.ok && parsed.invocation.effect.kind === "read";
   });
 
+/** Runs one validated `gh` step under the lease its effect calls for. */
+const runGhStep = async (
+  sandbox: LeaseSandbox,
+  step: GhStep,
+  role: ShellRole,
+  lease: LeaseDependencies | undefined
+): Promise<CliResult> => {
+  const invocation = await resolveStep(sandbox, step);
+  const { effect } = invocation;
+  if (role !== "orchestrator" && effect.kind !== "read") {
+    throw new Error("This agent only runs read-only gh commands.");
+  }
+  if (effect.kind === "state") {
+    await assertIsIssue(sandbox, effect.commentThread, lease);
+  }
+  return await runGh(
+    sandbox,
+    invocation,
+    effect.kind === "read" ? "repo-read" : "repo-triage",
+    lease
+  );
+};
+
 /**
- * Runs a list of `gh` commands that changes something, one validated
- * invocation at a time, the way a shell would run the list.
+ * Runs a list of `gh` commands, one validated invocation at a time, the way
+ * a shell would run the list.
+ *
+ * @remarks
+ * A step the runtime refuses (a missing `--body-file`, an issue number that
+ * turns out to be a pull request) throws when nothing has run yet. Once an
+ * earlier step has run, a refusal is reported as that step failing instead,
+ * so the agent still sees what the earlier steps did and does not repeat a
+ * comment that was already posted.
  */
 const runGhSteps = async (
-  sandbox: ToolSandbox,
+  sandbox: LeaseSandbox,
   steps: readonly GhStep[],
   role: ShellRole,
   lease: LeaseDependencies | undefined
 ): Promise<BashToolOutput> => {
+  if (steps.length > MAX_GH_STEPS) {
+    throw new Error(`Run at most ${MAX_GH_STEPS} gh commands in one command.`);
+  }
   const stdout: string[] = [];
   const stderr: string[] = [];
   let exitCode = 0;
   let truncated = false;
+  let ran = 0;
   for (const [index, step] of steps.entries()) {
     // As in a shell: `&&` skips its own step after a failure, and whatever
     // follows a later `;` still runs.
     if (index > 0 && step.after === "&&" && exitCode !== 0) {
       continue;
     }
-    // biome-ignore lint/performance/noAwaitInLoops: the steps run in order, each depending on the last
-    const invocation = await resolveStep(sandbox, step);
-    const { effect } = invocation;
-    if (role !== "orchestrator" && effect.kind !== "read") {
-      throw new Error("This agent only runs read-only gh commands.");
+    let result: CliResult;
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: the steps run in order, each depending on the last
+      result = await runGhStep(sandbox, step, role, lease);
+    } catch (error) {
+      if (ran === 0) {
+        throw error;
+      }
+      result = {
+        exitCode: 1,
+        stderr: error instanceof Error ? error.message : String(error),
+        stdout: "",
+        truncated: false,
+      };
     }
-    if (effect.kind === "state") {
-      await assertIsIssue(sandbox, effect.commentThread, lease);
-    }
-    const result = await runGh(
-      sandbox,
-      invocation,
-      effect.kind === "read" ? "repo-read" : "repo-triage",
-      lease
-    );
+    ran += 1;
     ({ exitCode } = result);
     truncated ||= result.truncated;
     if (result.stdout.trim()) {
@@ -262,7 +323,7 @@ const runGhSteps = async (
 };
 
 const runPush = async (
-  sandbox: ToolSandbox,
+  sandbox: LeaseSandbox,
   analysis: Extract<ShellAnalysis, { kind: "push" }>,
   role: ShellRole,
   lease: LeaseDependencies | undefined
@@ -311,7 +372,7 @@ export const WHOLE_COMMANDS_ONLY =
  * Anything else is refused with the form that works.
  */
 const runWithoutShell = async (
-  sandbox: ToolSandbox,
+  sandbox: LeaseSandbox,
   command: string,
   analysis: ShellAnalysis,
   role: ShellRole,
@@ -340,7 +401,7 @@ const READS = `git and gh work here as usual, against ${FACTORY_REPO} (leave out
 
 const GITHUB_NOTES: Readonly<Record<ShellRole, string>> = {
   implementer: `${READS} gh is read-only here. To deliver your committed branch, make git push the whole command: git push origin <branch>. Only branches that start with ${FACTORY_BRANCH_PREFIX} can be pushed; force pushes and deleting branches are refused.`,
-  orchestrator: `${READS} A command that changes GitHub (comment, label, create, edit, close, reopen, gh pr create) has to be the whole command: only gh commands, joined with && when there are several, every argument written out, with no pipes, variables, or redirects. For text with several lines, or with a dollar sign or a backtick in it, use --body "$(cat <<'EOF' ... EOF)" or --body-file <path>. Examples: gh issue comment 12 --body "Classification is complete."; gh issue edit 12 --add-label bug; gh pr create --draft --head factory/bug-fix-login --base main --title "Fix login 500" --body-file pr-body.md. Merging and pushing are not available.`,
+  orchestrator: `${READS} A command that changes GitHub (comment, label, create, edit, close, reopen, gh pr create) has to be the whole command: only gh commands, joined with && when there are several, every argument written out, with no pipes, variables, or redirects. For text with several lines, or with a dollar sign or a backtick in it, use --body "$(cat <<'EOF' ... EOF)" or --body-file <path>. Examples: gh issue comment 12 --body "Classification is complete."; gh issue edit 12 --add-label bug; gh pr create --draft --head factory/bug-fix-login --base main --title "Fix login 500" --body-file pr-body.md. An unattended run has no shell, only gh: whole gh commands, no pipes, no other programs; shape output with --json and --jq. Merging and pushing are not available.`,
   reader: `${READS} gh is read-only here and this agent never pushes.`,
 };
 
@@ -368,14 +429,21 @@ export const bashTool = (options: {
     description: `${bash.description}\n\n${GITHUB_NOTES[role]}`,
     async execute(input: BashToolInput, ctx): Promise<BashToolOutput> {
       const analysis = analyzeCommand(input.command);
+      // An unattended run on the orchestrator has no shell: only gh, run by
+      // the runtime. The approval policy has already said so; this holds
+      // even if it is ever bypassed.
+      const hasShell = shellAvailable(role, ctx.session.auth.current);
+      if (!hasShell && analysis.kind !== "gh") {
+        throw new Error(GH_ONLY);
+      }
       if (analysis.kind === "plain") {
         return await shell(input, ctx);
       }
-      const sandbox: ToolSandbox = await ctx.getSandbox(options.environment);
+      const sandbox: LeaseSandbox = await ctx.getSandbox(options.environment);
       if (analysis.kind === "push") {
         return await runPush(sandbox, analysis, role, lease);
       }
-      if (analysis.kind === "gh" && !onlyReads(analysis.steps)) {
+      if (analysis.kind === "gh" && !(hasShell && onlyReads(analysis.steps))) {
         return await runGhSteps(sandbox, analysis.steps, role, lease);
       }
       try {

@@ -1,7 +1,7 @@
 import type { GitHubChannelState } from "eve/channels/github";
 import { FACTORY_REPO } from "../constants.js";
 import { shellQuote } from "./cli.js";
-import { GIT_BINARY } from "./git-cli.js";
+import { GIT_BINARY, rewriteGuard } from "./git-cli.js";
 import { REMOTE_URL, validateRef } from "./git-remote.js";
 import {
   type LeaseDependencies,
@@ -113,6 +113,7 @@ export const checkoutCommand = (path: string, plan: CheckoutPlan): string =>
   [
     `mkdir -p ${shellQuote(path)}`,
     git(path, "init", "-q"),
+    `{ ${rewriteGuard(path)}; }`,
     `(${git(path, "remote", "remove", "origin")} >/dev/null 2>&1 || true)`,
     git(path, "remote", "add", "origin", shellQuote(REMOTE_URL)),
     git(path, "fetch", "--depth", "1", "origin", shellQuote(plan.ref)),

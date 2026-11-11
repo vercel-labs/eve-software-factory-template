@@ -8,8 +8,17 @@ import {
   parseGitFetch,
   parseGitPush,
   pushCommandLine,
+  rewriteGuard,
 } from "#lib/github/git-cli.js";
 import { validateBranch, validateRef } from "#lib/github/git-remote.js";
+
+/**
+ * What every git command the runtime writes for a station's checkout starts
+ * with: stop, with a message, when one of git's config files rewrites URLs.
+ * Written out in full here; tests/github/git-real.test.ts runs it.
+ */
+const GUARD =
+  "for scope in --local --worktree --global --system; do if /usr/bin/git -C '/workspace/repo' config \"$scope\" --includes --get-regexp '^url\\.' >/dev/null 2>&1; then echo 'A git URL rewrite (url.<base>.insteadOf) is configured in this sandbox. Remove it and run the command again.' >&2; exit 1; fi; done";
 
 /** The branch a push was accepted for; null means the checked-out branch. */
 const branchOf = (...args: string[]): string | null => {
@@ -189,6 +198,47 @@ describe("parseGitPush: refusals", () => {
   });
 });
 
+/*
+ * The runtime's git commands name the repository's URL literally, so the
+ * remote a checkout has configured cannot send them elsewhere. A
+ * `url.<base>.insteadOf` rule can: git applies it to a literal URL too, and
+ * the checkout's config is the agent's to write. The guard refuses to run
+ * with one in any of git's config files.
+ */
+describe("rewriteGuard", () => {
+  test("is one shell fragment: each config file in turn, includes followed, any url.* key, a message on stderr and exit 1", () => {
+    expect(rewriteGuard("/workspace/repo")).toBe(GUARD);
+  });
+
+  test("looks in the checkout's, the user's and the system's config files, and not at the environment, where the runtime's own settings travel", () => {
+    expect(GUARD).toContain(
+      "for scope in --local --worktree --global --system;"
+    );
+    expect(GUARD).not.toMatch(/GIT_CONFIG|--show-origin|-c /);
+  });
+
+  test("names git by absolute path, so a git earlier on PATH cannot answer for it", () => {
+    expect(GUARD).toContain(" /usr/bin/git -C ");
+    expect(GUARD.match(/\bgit\b/g)).toHaveLength(2);
+  });
+
+  test("ends without a separator, so a caller chooses how the command goes on", () => {
+    expect(GUARD.endsWith("fi; done")).toBe(true);
+  });
+
+  test.each<[string, string]>([
+    ["/workspace/repo", "'/workspace/repo'"],
+    ["/vercel/sandbox", "'/vercel/sandbox'"],
+    ["/tmp/my repo", "'/tmp/my repo'"],
+    ["/tmp/it's here", "'/tmp/it'\\''s here'"],
+    ["/tmp/$(id); x", "'/tmp/$(id); x'"],
+  ])("the checkout path %j is quoted as one word", (path, quoted) => {
+    expect(rewriteGuard(path)).toBe(
+      GUARD.replace("'/workspace/repo'", () => quoted)
+    );
+  });
+});
+
 describe("the commands the runtime writes for a push", () => {
   const GIT = "/usr/bin/git -C '/workspace/repo'";
 
@@ -196,11 +246,22 @@ describe("the commands the runtime writes for a push", () => {
     expect(GIT_BINARY).toBe("/usr/bin/git");
   });
 
-  test("the push updates exactly the branch it names on the literal repository URL, then the tracking ref", () => {
+  test("the guard comes first; then the push updates exactly the branch it names on the literal repository URL, then the tracking ref", () => {
     expect(pushCommandLine("factory/bug-x")).toBe(
-      `${GIT} push 'https://github.com/acme/widgets.git' 'refs/heads/factory/bug-x:refs/heads/factory/bug-x' && ${GIT} update-ref 'refs/remotes/origin/factory/bug-x' 'refs/heads/factory/bug-x'`
+      `${GUARD}; ${GIT} push 'https://github.com/acme/widgets.git' 'refs/heads/factory/bug-x:refs/heads/factory/bug-x' && ${GIT} update-ref 'refs/remotes/origin/factory/bug-x' 'refs/heads/factory/bug-x'`
     );
   });
+
+  test.each(["factory/x", "factory/bug-fix-login", "factory/a.b_c"])(
+    "the push of %s starts with the guard for the station's checkout",
+    (branch) => {
+      expect(
+        pushCommandLine(branch).startsWith(
+          `${rewriteGuard("/workspace/repo")}; /usr/bin/git -C '/workspace/repo' push `
+        )
+      ).toBe(true);
+    }
+  );
 
   test("the remote is never the checkout's origin, which a model can rewrite", () => {
     expect(pushCommandLine("factory/x")).not.toMatch(/\borigin\b(?!\/)/);
@@ -325,7 +386,8 @@ describe("validateRef and validateBranch", () => {
  * the fetch itself.
  */
 describe("parseGitFetch", () => {
-  const GIT = "/usr/bin/git -C '/workspace/repo' fetch";
+  // Like a push, a fetch the runtime writes starts with the guard.
+  const GIT = `${GUARD}; /usr/bin/git -C '/workspace/repo' fetch`;
   const URL = "'https://github.com/acme/widgets.git'";
   const spec = (branch: string) =>
     `'+refs/heads/${branch}:refs/remotes/origin/${branch}'`;
@@ -348,9 +410,14 @@ describe("parseGitFetch", () => {
       `${GIT} '--no-tags' '--unshallow' ${URL} ${spec("main")}`,
     ],
   ])(
-    "fetch %j is rendered against the literal repository URL",
+    "fetch %j is rendered behind the guard, against the literal repository URL",
     (args, line) => {
       expect(parseGitFetch(args)).toEqual({ commandLine: line, ok: true });
+      expect(
+        line.startsWith(
+          `${rewriteGuard("/workspace/repo")}; /usr/bin/git -C '/workspace/repo' fetch `
+        )
+      ).toBe(true);
     }
   );
 

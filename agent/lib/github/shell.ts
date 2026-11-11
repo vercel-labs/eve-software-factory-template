@@ -287,32 +287,28 @@ export const lexLiteralCommands = (
 };
 
 const NAMES_GH = /(?:^|[^\w./-])gh(?:[^\w-]|$)/;
-const GIT_WORD = /(?:^|[^\w./-])git(?=\s)/g;
+const GIT_WORD = /(?:^|[^\w./-])git(?=\s)/;
 const SEGMENT_END = /[;|&\n]/;
 const NETWORK_SUBCOMMAND =
   /(?:^|\s)(?:fetch|pull|push|clone|ls-remote)(?:[^\w-]|$)/;
 
 /**
- * Whether some `git` in the command is followed, before the command it is
- * part of ends, by the name of a subcommand that talks to a remote.
+ * Whether some command in the text has a `git` followed, before that
+ * command ends, by the name of a subcommand that talks to a remote.
  *
  * @remarks
- * This looks at the text between `git` and the next `;`, `|`, `&`, or new
- * line instead of working out which word is the subcommand, so it is right
- * about `git -C 'my repo' fetch` and `git --git-dir .git fetch`, and wrong
- * in the harmless direction about `git commit -m "fetch fix"`. Each step is
- * a single pass over the text.
+ * The text is cut at every `;`, `|`, `&`, and new line, and each piece is
+ * looked at once: is there a `git`, and after the first one, one of the
+ * names. That does not work out which word is the subcommand, so it is
+ * right about `git -C 'my repo' fetch` and `git --git-dir .git fetch`, and
+ * wrong in the harmless direction about `git commit -m "fetch fix"`. It is
+ * one pass over the text, whatever the text is.
  */
-const namesGitNetwork = (command: string): boolean => {
-  for (const match of command.matchAll(GIT_WORD)) {
-    const rest = command.slice(match.index + match[0].length);
-    const end = rest.search(SEGMENT_END);
-    if (NETWORK_SUBCOMMAND.test(end === -1 ? rest : rest.slice(0, end))) {
-      return true;
-    }
-  }
-  return false;
-};
+const namesGitNetwork = (command: string): boolean =>
+  command.split(SEGMENT_END).some((segment) => {
+    const at = segment.search(GIT_WORD);
+    return at !== -1 && NETWORK_SUBCOMMAND.test(segment.slice(at));
+  });
 
 /**
  * Whether a command names `gh` or a `git` command that talks to a remote.
@@ -381,6 +377,10 @@ const asksForHelp = (command: SimpleCommand): boolean =>
 
 /** Sorts a `bash` command into the kind that decides its credential. */
 export const analyzeCommand = (command: string): ShellAnalysis => {
+  // Too long to read: treated as naming GitHub, which can only read.
+  if (command.length > MAX_ANALYZED_LENGTH) {
+    return { kind: "shell" };
+  }
   if (!namesGitHub(command)) {
     return { kind: "plain" };
   }

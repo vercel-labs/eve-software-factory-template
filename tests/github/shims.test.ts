@@ -29,8 +29,9 @@ import {
  * @remarks
  * The wrappers are shell scripts, so the only honest test is to run them.
  * Each is generated with a stand-in for the real binary: a script that
- * prints the arguments and the environment it was given and exits with the
- * status the test asks for. Nothing here reaches GitHub or needs `gh`.
+ * prints the arguments and the environment it was given, complains on
+ * stderr when the test asks it to, and exits with the status the test asks
+ * for. Nothing here reaches GitHub or needs `gh`.
  */
 const LEASE = "factory-3f0c9d1e-8a52-4b7e-9c1d-000000000001";
 const REPO = "acme/widgets";
@@ -53,6 +54,8 @@ const STAND_IN = [
   "  printf '[%s]\\n' \"$argument\"",
   "done",
   ...REPORTED.map((name) => `printf '${name}=%s\\n' "\${${name}-${UNSET}}"`),
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: the shell's braces, not a template's.
+  'if [ -n "${FAKE_STDERR:-}" ]; then printf \'%s\\n\' "$FAKE_STDERR" >&2; fi',
   // biome-ignore lint/suspicious/noTemplateCurlyInString: the shell's braces, not a template's.
   'exit "${FAKE_EXIT:-0}"',
   "",
@@ -180,11 +183,31 @@ describe("the wrapper scripts themselves", () => {
     ["PUSH_HINT", PUSH_HINT],
     ["NO_PUSH_HINT", NO_PUSH_HINT],
   ])("%s holds nothing a shell acts on inside double quotes", (_name, hint) => {
-    // The hints are echoed from inside double quotes in the scripts.
+    // The hints are printed from inside double quotes in the scripts.
     expect(hint).not.toMatch(/['"$`\\]/);
     expect(hint).not.toContain("\n");
     expect(hint.length).toBeGreaterThan(0);
   });
+
+  // `echo` is not one program: dash's turns the two characters backslash
+  // and n into a new line, bash's prints them. A message can carry words
+  // the caller typed, so the scripts print with printf and a fixed format.
+  test.each([
+    ["gh", () => ghShim()],
+    ["git", () => gitShim()],
+  ])(
+    "the %s wrapper prints every message with printf, never echo",
+    (_name, script) => {
+      expect(script()).not.toMatch(/\becho\b/);
+      const messages = script()
+        .split("\n")
+        .filter((line) => line.includes(">&2"));
+      expect(messages.length).toBeGreaterThan(0);
+      for (const line of messages) {
+        expect(line.trimStart().startsWith("printf '%s\\n' \"")).toBe(true);
+      }
+    }
+  );
 });
 
 describe.each(SHELLS)("the gh wrapper, run by %s", (shell) => {
@@ -286,6 +309,145 @@ describe.each(SHELLS)("the gh wrapper, run by %s", (shell) => {
         expect(result.stdout).toBe("");
       }
     );
+  });
+
+  /*
+   * gh takes --repo anywhere, and a model that has just read `gh --help`
+   * often writes it first. The command path is the first two words that are
+   * not the flag, so the checks below it see the same command either way.
+   */
+  describe("the repository flag ahead of the command", () => {
+    test.each([
+      [["-R", "acme/widgets", "issue", "view", "12"]],
+      [["--repo", "acme/widgets", "pr", "list"]],
+      [["--repo=acme/widgets", "issue", "view", "12"]],
+      [["-R", "ACME/Widgets", "pr", "view", "34", "--json", "title"]],
+      [["--repo", "https://github.com/acme/widgets.git", "label", "list"]],
+      // Between the two words of the path, too.
+      [["issue", "-R", "acme/widgets", "view", "12"]],
+      [["pr", "--repo=acme/widgets", "diff", "34"]],
+      // And ahead of the one-word path.
+      [["-R", "acme/widgets", "api", "repos/acme/widgets/pulls/3/files"]],
+      [["--repo=acme/widgets", "-R", "acme/widgets", "issue", "list"]],
+    ])(
+      "%j reaches gh with its arguments as they were written, the placeholder, and the repository",
+      (args) => {
+        const result = runGh(args, leased("reader"));
+        expect(result.stdout).toBe(ran(args, GH_ENVIRONMENT));
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+      }
+    );
+
+    test.each([
+      [["-R", "other/repo", "issue", "view", "12"]],
+      [["--repo", "other/repo", "pr", "list"]],
+      [["--repo=other/repo", "issue", "view", "12"]],
+      [["-R", "acme/widgets-fork", "issue", "view", "12"]],
+      [["issue", "-R", "other/repo", "view", "12"]],
+      [["-R", "acme/widgets", "issue", "view", "12", "-R", "other/repo"]],
+    ])("%j is still refused: another repository", (args) => {
+      const result = runGh(args, leased("reader"));
+      expect(result.status).toBe(2);
+      expect(result.stderr).toBe(
+        "gh works on acme/widgets only; leave out --repo.\n"
+      );
+      expect(result.stdout).toBe("");
+    });
+
+    test.each([
+      [
+        ["-R", "acme/widgets", "issue", "comment", "12", "--body", "hi"],
+        "issue comment",
+      ],
+      [["--repo", "acme/widgets", "pr", "create", "--title", "t"], "pr create"],
+      [["--repo=acme/widgets", "issue", "close", "12"], "issue close"],
+      [
+        ["issue", "-R", "acme/widgets", "edit", "12", "--add-label", "bug"],
+        "issue edit",
+      ],
+      // Whichever repository it names: the write is what stops it.
+      [["-R", "other/repo", "pr", "ready", "34"], "pr ready"],
+    ])(
+      "a write behind the flag, %j, is still sent back with the form that works",
+      (args, path) => {
+        const asOrchestrator = runGh(args, leased("orchestrator"));
+        expect(asOrchestrator.status).toBe(2);
+        expect(asOrchestrator.stderr).toBe(`gh ${path} ${GH_WRITE_HINT}\n`);
+        expect(asOrchestrator.stdout).toBe("");
+
+        const asReader = runGh(args, leased("reader"));
+        expect(asReader.status).toBe(2);
+        expect(asReader.stderr).toBe(`gh ${path} ${GH_READER_HINT}\n`);
+        expect(asReader.stdout).toBe("");
+      }
+    );
+
+    test.each([
+      [["-R", "acme/widgets", "pr", "merge", "12"], "pr merge"],
+      [["--repo=acme/widgets", "auth", "token"], "auth token"],
+      [["--repo", "acme/widgets", "secret", "list"], "secret list"],
+    ])(
+      "a command outside the list behind the flag, %j, is still refused by name",
+      (args, path) => {
+        const result = runGh(args, leased("orchestrator"));
+        expect(result.status).toBe(2);
+        expect(result.stderr).toBe(
+          `gh ${path} is not available to the factory. Available: ${GH_COMMANDS.join(", ")}.\n`
+        );
+        expect(result.stdout).toBe("");
+      }
+    );
+
+    test("a read behind the flag still needs a lease", () => {
+      const result = runGh(["-R", "acme/widgets", "issue", "view", "12"]);
+      expect(result.status).toBe(4);
+      expect(result.stderr).toBe(`gh: ${NO_CREDENTIAL}\n`);
+      expect(result.stdout).toBe("");
+    });
+
+    test.each([[["-R", "acme/widgets"]], [["--repo=acme/widgets"]], [["-R"]]])(
+      "the flag with no command after it, %j, names no command and is refused",
+      (args) => {
+        const result = runGh(args, leased("reader"));
+        expect(result.status).toBe(2);
+        expect(result.stderr).toBe(
+          `gh   is not available to the factory. Available: ${GH_COMMANDS.join(", ")}.\n`
+        );
+        expect(result.stdout).toBe("");
+      }
+    );
+  });
+
+  // A message can carry words the caller typed. They are printed as typed:
+  // a backslash and a letter stay two characters under every shell.
+  describe("a message that carries a backslash", () => {
+    test.each<[string[], string]>([
+      [["a\\nb", "c"], "a\\nb c"],
+      [["x\\ty", "z\\\\w"], "x\\ty z\\\\w"],
+      // `\c` ends the output of an echo that reads escapes.
+      [["cut\\c", "short"], "cut\\c short"],
+      [["-n", "-e"], "-n -e"],
+      [["%s%d", "100%"], "%s%d 100%"],
+    ])("gh %j: the path is printed as it was typed", (args, path) => {
+      const result = runGh(args, leased("orchestrator"));
+      expect(result.status).toBe(2);
+      expect(result.stderr).toBe(
+        `gh ${path} is not available to the factory. Available: ${GH_COMMANDS.join(", ")}.\n`
+      );
+      expect(result.stdout).toBe("");
+    });
+
+    test("the repository's name is printed as it was set", () => {
+      const result = runGh(["issue", "list", "-R", "other/repo"], {
+        ...leased("reader"),
+        [REPO_VARIABLE]: "ac\\tme/wid\\nge\\\\ts",
+      });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toBe(
+        "gh works on ac\\tme/wid\\nge\\\\ts only; leave out --repo.\n"
+      );
+    });
   });
 
   describe("the repository is pinned", () => {
@@ -537,42 +699,114 @@ describe.each(SHELLS)("the git wrapper, run by %s", (shell) => {
     );
   });
 
-  describe("commands that talk to a remote, without a lease", () => {
-    test.each([
-      [["fetch", "origin", "factory/x"]],
-      [["pull"]],
-      [["clone", "https://github.com/acme/widgets.git"]],
-      [["ls-remote"]],
-      [["push", "origin", "factory/x"]],
-      [["-C", "dir", "fetch"]],
-    ])("%j runs unchanged and adds nothing when it works", (args) => {
-      const result = runGit(args);
-      expect(result.stdout).toBe(ran(args));
-      expect(result.stderr).toBe("");
-      expect(result.status).toBe(0);
-    });
+  /*
+   * Outside a factory command the wrapper is git: a test suite, a package
+   * manager, or a script the agent wrote all call `git` and must see what
+   * git prints and nothing else. So with no lease in the environment every
+   * subcommand is handed to git as is, the ones that talk to a remote too.
+   */
+  describe("without a lease, every command is git's own", () => {
+    const COMMANDS: string[][] = [
+      // The ones that talk to a remote.
+      ["fetch"],
+      ["fetch", "origin", "factory/x"],
+      ["pull"],
+      ["pull", "--ff-only", "origin", "main"],
+      ["clone", "https://github.com/acme/widgets.git"],
+      ["clone", "https://github.com/acme/widgets.git", "a directory"],
+      ["ls-remote"],
+      ["ls-remote", "--heads", "origin"],
+      ["push"],
+      ["push", "origin", "factory/x"],
+      ["push", "--force", "origin", "main"],
+      ["-C", "dir", "fetch"],
+      ["-c", "a=b", "push", "origin", "factory/x"],
+      ["--git-dir", ".git", "--work-tree", ".", "pull"],
+      ["fetch", "origin", 'it\'s a "ref" $HOME\nwith a new line'],
+      // And the ones that never did.
+      ["status"],
+      ["commit", "-m", "x"],
+      ["remote", "-v"],
+      ["--version"],
+      [],
+    ];
 
-    test.each([
-      [["fetch", "origin"], "fetch"],
-      [["pull"], "pull"],
-      [["clone", "https://github.com/acme/widgets.git"], "clone"],
-      [["ls-remote"], "ls-remote"],
-      [["push", "origin", "factory/x"], "push"],
-      [["-C", "dir", "fetch"], "fetch"],
-    ])(
-      "%j that fails keeps its status and adds the hint",
-      (args, subcommand) => {
-        const result = runGit(args, {
-          FAKE_EXIT: "128",
-          [ROLE_VARIABLE]: "reader",
-        });
-        expect(result.stdout).toBe(ran(args));
-        expect(result.status).toBe(128);
-        expect(result.stderr).toBe(
-          `git ${subcommand}: if this needed GitHub, ${NO_CREDENTIAL}\n`
-        );
+    /** Ways the environment can lack a lease. The role alone is not one. */
+    const UNLEASED: [string, Record<string, string>][] = [
+      ["nothing set", {}],
+      ["an empty lease", { [LEASE_VARIABLE]: "" }],
+      ["a role and no lease", { [ROLE_VARIABLE]: "implementer" }],
+      [
+        "a repository and a role and no lease",
+        { [REPO_VARIABLE]: REPO, [ROLE_VARIABLE]: "reader" },
+      ],
+    ];
+
+    const COMPLAINT =
+      "fatal: could not read Username for 'https://github.com': terminal prompts disabled";
+
+    test.each(COMMANDS.map((args) => [args]))(
+      "%j reaches git with the same arguments, and nothing is added to what git prints",
+      (args) => {
+        for (const [, environment] of UNLEASED) {
+          const result = runGit(args, environment);
+          // No credential, and no setting of the wrapper's own either.
+          expect(result.stdout).toBe(ran(args));
+          expect(result.stderr).toBe("");
+          expect(result.status).toBe(0);
+        }
       }
     );
+
+    test.each(COMMANDS.map((args) => [args]))(
+      "%j that fails: git's own message and status, and not a word more",
+      (args) => {
+        for (const [, environment] of UNLEASED) {
+          const result = runGit(args, {
+            ...environment,
+            FAKE_EXIT: "128",
+            FAKE_STDERR: COMPLAINT,
+          });
+          expect(result.stdout).toBe(ran(args));
+          expect(result.stderr).toBe(`${COMPLAINT}\n`);
+          expect(result.status).toBe(128);
+        }
+      }
+    );
+
+    test.each([[1], [2], [127], [255]])(
+      "git's exit status %i is the wrapper's, for a command that talks to a remote as for any other",
+      (status) => {
+        for (const args of [["fetch", "origin"], ["push"], ["status"]]) {
+          const result = runGit(args, { FAKE_EXIT: String(status) });
+          expect(result.status).toBe(status);
+          expect(result.stderr).toBe("");
+        }
+      }
+    );
+
+    test("a failed push gets no hint without a lease, whatever the role", () => {
+      for (const role of ["implementer", "reader", "orchestrator"]) {
+        const result = runGit(["push", "origin", "factory/x"], {
+          FAKE_EXIT: "1",
+          [ROLE_VARIABLE]: role,
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toBe("");
+      }
+    });
+
+    test("under a lease the same failed push does get its hint, after whatever git said", () => {
+      const result = runGit(["push", "origin", "factory/x"], {
+        ...leased("implementer"),
+        FAKE_EXIT: "1",
+        FAKE_STDERR: "! [rejected] factory/x -> factory/x (fetch first)",
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(
+        `! [rejected] factory/x -> factory/x (fetch first)\n${PUSH_HINT}\n`
+      );
+    });
   });
 });
 
@@ -710,23 +944,51 @@ describe.skipIf(!hasGit)("the git wrapper around the real git", () => {
     expect(plain(second, "log", "-1", "--format=%s")).toBe("initial commit");
   });
 
+  /** The real git, run directly, reporting everything a caller can see. */
+  const direct = (cwd: string, args: readonly string[]) =>
+    spawnSync(realGit, [...args], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, ...identity },
+    });
+
   test("git's own failure passes through with its message and status", () => {
     const failed = wrapped(checkout, ["fetch", "origin", "factory/missing"]);
     expect(failed.status).toBe(128);
     expect(failed.stderr).toMatch(/couldn't find remote ref factory\/missing/);
     expect(failed.stderr).not.toContain("credential");
-
-    const unleased = wrapped(
-      checkout,
-      ["fetch", "origin", "factory/missing"],
-      {}
-    );
-    expect(unleased.status).toBe(128);
-    expect(unleased.stderr).toMatch(/couldn't find remote ref/);
-    expect(unleased.stderr).toContain(
-      `git fetch: if this needed GitHub, ${NO_CREDENTIAL}`
-    );
   });
+
+  test.each([
+    ["a fetch that fails", ["fetch", "origin", "factory/missing"], 128],
+    ["a push that fails", ["push", "origin", "factory/never-made"], 1],
+    [
+      "an ls-remote of a remote that is not there",
+      ["ls-remote", "nowhere"],
+      128,
+    ],
+    [
+      "a pull that fails",
+      ["pull", "--ff-only", "origin", "factory/missing"],
+      1,
+    ],
+    ["a command git does not know", ["frobnicate"], 1],
+    ["a fetch that works", ["fetch", "origin"], 0],
+    ["an ls-remote that works", ["ls-remote", "--heads", "origin"], 0],
+    ["a status", ["status", "--short", "--branch"], 0],
+  ] as const)(
+    "without a lease, %s is exactly what git itself does: the same output, the same message, the same status",
+    (_name, args, status) => {
+      const expected = direct(checkout, args);
+      expect(expected.status).toBe(status);
+      const unleased = wrapped(checkout, args, {});
+      expect(unleased.status).toBe(expected.status);
+      expect(unleased.stdout).toBe(expected.stdout);
+      expect(unleased.stderr).toBe(expected.stderr);
+      // The wrapper used to add a line about credentials to a failure here.
+      expect(unleased.stderr).not.toContain("credential");
+    }
+  );
 
   test("the credential never lands in the checkout's configuration", () => {
     expect(plain(checkout, "config", "--local", "--list")).not.toMatch(

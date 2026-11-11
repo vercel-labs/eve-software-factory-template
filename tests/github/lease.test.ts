@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { parseGh, RUNNER_PATH } from "#lib/github/cli.js";
 import { parseGitFetch, pushCommandLine } from "#lib/github/git-cli.js";
 import {
+  GH_TIMEOUT_MS,
+  GIT_TIMEOUT_MS,
+  LEASE_RESET_ATTEMPTS,
+  LEASED_GIT_TIMEOUT_MS,
+  type LeaseDependencies,
   type LeaseSandbox,
   leasePolicy,
   MAX_OUTPUT_CHARACTERS,
@@ -12,10 +17,13 @@ import {
   runGh,
   runGitFetch,
   runGitPush,
+  runLeasedGitCommand,
   SCOPE_DOWNGRADE_TTL_MS,
   type ShellLease,
+  STRICT_REFUSAL_TTL_MS,
   TOKEN_SCOPES,
   type TokenMinter,
+  type TokenScope,
   withShellLease,
 } from "#lib/github/lease.js";
 
@@ -29,21 +37,38 @@ type Step =
   | { kind: "write"; content: string; path: string };
 
 /**
+ * The guard every git command the runtime writes starts with: it stops the
+ * command when one of git's config files rewrites URLs
+ * (tests/github/git-cli.test.ts holds the text; git-real.test.ts runs it).
+ */
+const GUARD =
+  "for scope in --local --worktree --global --system; do if /usr/bin/git -C '/workspace/repo' config \"$scope\" --includes --get-regexp '^url\\.' >/dev/null 2>&1; then echo 'A git URL rewrite (url.<base>.insteadOf) is configured in this sandbox. Remove it and run the command again.' >&2; exit 1; fi; done; ";
+
+/**
  * A sandbox that records everything a lease does to it, in order, and
  * answers each command from `respond`.
+ *
+ * @param options.resetFailures - How many times taking the credential off
+ * the firewall (`allow-all`) fails before it works. Each try is recorded,
+ * the failed ones too.
  */
 const fakeSandbox = (
   respond: (command: string) => {
     exitCode?: number;
     stderr?: string;
     stdout?: string;
-  } = () => ({})
+  } = () => ({}),
+  options: { resetFailures?: number } = {}
 ) => {
   const steps: Step[] = [];
+  /** Whether each command was given a signal to stop it, in order. */
+  const signals: (AbortSignal | undefined)[] = [];
+  let resets = 0;
   const sandbox: LeaseSandbox = {
     name: "sbx_test",
-    run: async ({ command, env }) => {
+    run: async ({ command, env, signal }) => {
       steps.push({ command, env: env ?? {}, kind: "run" });
+      signals.push(signal);
       const result = respond(command);
       return {
         exitCode: result.exitCode ?? 0,
@@ -53,12 +78,18 @@ const fakeSandbox = (
     },
     setNetworkPolicy: async (policy) => {
       steps.push({ kind: "policy", policy });
+      if (policy === "allow-all") {
+        resets += 1;
+        if (resets <= (options.resetFailures ?? 0)) {
+          throw new Error(`sandbox API unavailable (reset ${resets})`);
+        }
+      }
     },
     writeTextFile: async ({ content, path }) => {
       steps.push({ content, kind: "write", path });
     },
   };
-  return { sandbox, steps };
+  return { sandbox, signals, steps };
 };
 
 const mintOk = (): {
@@ -451,8 +482,9 @@ describe("runGitPush: the one command that leases a contents-write token", () =>
     expect(run?.kind === "run" && run.command).toBe(
       pushCommandLine("factory/bug-x")
     );
+    // The guard first; then the push to the literal URL, and the tracking ref.
     expect(run?.kind === "run" && run.command).toBe(
-      "/usr/bin/git -C '/workspace/repo' push 'https://github.com/acme/widgets.git' 'refs/heads/factory/bug-x:refs/heads/factory/bug-x' && /usr/bin/git -C '/workspace/repo' update-ref 'refs/remotes/origin/factory/bug-x' 'refs/heads/factory/bug-x'"
+      `${GUARD}/usr/bin/git -C '/workspace/repo' push 'https://github.com/acme/widgets.git' 'refs/heads/factory/bug-x:refs/heads/factory/bug-x' && /usr/bin/git -C '/workspace/repo' update-ref 'refs/remotes/origin/factory/bug-x' 'refs/heads/factory/bug-x'`
     );
     const env = run?.kind === "run" ? run.env : {};
     expect(env).toEqual({
@@ -557,7 +589,7 @@ describe("runGitFetch: a fetch the runtime wrote, for a deployment with no read-
     });
     const run = steps.at(1);
     expect(run?.kind === "run" && run.command).toBe(
-      "/usr/bin/git -C '/workspace/repo' fetch 'https://github.com/acme/widgets.git' '+refs/heads/factory/bug-x:refs/remotes/origin/factory/bug-x'"
+      `${GUARD}/usr/bin/git -C '/workspace/repo' fetch 'https://github.com/acme/widgets.git' '+refs/heads/factory/bug-x:refs/remotes/origin/factory/bug-x'`
     );
     const env = run?.kind === "run" ? run.env : {};
     expect(env).toMatchObject({
@@ -723,38 +755,83 @@ describe("withShellLease: the lease a shell command runs under", () => {
     const { sandbox, steps } = fakeSandbox();
     const app = wideOnly();
     const dependencies = { ...app.dependencies, now: () => clock };
+    const NARROW = [READ_PERMISSIONS, TOKEN_SCOPES["repo-read"].required];
 
     // The runner runs a command the runtime parsed, so it follows the setting.
     await runGh(sandbox, gh("issue", "view", "12"), "repo-read", dependencies);
-    expect(app.requests.at(-1)).toBeNull();
-    const asked = app.requests.length;
+    expect(app.requests).toEqual([...NARROW, null]);
     const policies = steps.filter((step) => step.kind === "policy").length;
 
-    // The shell lease sees the remembered wide rung and refuses outright.
+    // The shell lease does not look at what the runner was given. It asks
+    // for the narrow sets itself, is refused, and never asks for the wide one.
     let started = false;
-    await expect(
+    const attempt = () =>
       withShellLease(sandbox, dependencies, async () => {
         started = true;
-      })
-    ).rejects.toBeInstanceOf(NarrowTokenError);
+      });
+    await expect(attempt()).rejects.toBeInstanceOf(NarrowTokenError);
+    expect(app.requests).toEqual([...NARROW, null, ...NARROW]);
+
+    // That refusal is remembered for a minute, so the next commands do not
+    // each pay for two requests that will fail.
+    clock += STRICT_REFUSAL_TTL_MS - 1;
+    await expect(attempt()).rejects.toBeInstanceOf(NarrowTokenError);
+    expect(app.requests).toEqual([...NARROW, null, ...NARROW]);
+
+    // Then it asks again, and again for the narrow sets only.
+    clock += 1;
+    await expect(attempt()).rejects.toBeInstanceOf(NarrowTokenError);
+    expect(app.requests).toEqual([...NARROW, null, ...NARROW, ...NARROW]);
+
     expect(started).toBe(false);
-    expect(app.requests).toHaveLength(asked);
+    expect(app.installationCalls()).toBe(0);
     expect(steps.filter((step) => step.kind === "policy")).toHaveLength(
       policies
     );
+  });
 
-    // Once that memory expires it asks again, for the narrow sets only.
-    clock += SCOPE_DOWNGRADE_TTL_MS + 1;
-    await expect(
-      withShellLease(sandbox, dependencies, async () => {
-        started = true;
-      })
-    ).rejects.toBeInstanceOf(NarrowTokenError);
-    expect(started).toBe(false);
-    expect(app.requests.slice(asked)).toEqual([
-      READ_PERMISSIONS,
-      TOKEN_SCOPES["repo-read"].required,
+  // A network blip looks like a refusal to narrow. Before, the wide token
+  // the runner fell back to then kept every shell command from a credential
+  // for ten minutes; now the shell lease finds out for itself.
+  test("a wider token the runner fell back to once does not keep a shell from the narrow one", async () => {
+    vi.stubEnv("FACTORY_TOKEN_FALLBACK", "repository");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { sandbox, steps } = fakeSandbox();
+    const requests: (readonly string[] | null)[] = [];
+    const connector = { narrows: false };
+    const dependencies: LeaseDependencies = {
+      id: () => "lease-9",
+      mint: async (permissions) => {
+        requests.push(permissions);
+        if (permissions !== null && !connector.narrows) {
+          throw new Error("ETIMEDOUT");
+        }
+        return permissions === null ? "ghs_WIDE_TOKEN" : TOKEN;
+      },
+      now: () => 1_000_000,
+    };
+    await runGh(sandbox, gh("issue", "view", "12"), "repo-read", dependencies);
+    expect(requests.at(-1)).toBeNull();
+
+    connector.narrows = true;
+    const asked = requests.length;
+    const done = steps.length;
+    const placeholder = await withShellLease(
+      sandbox,
+      dependencies,
+      async (lease) => lease.placeholder
+    );
+    expect(placeholder).toBe("factory-lease-9");
+    expect(requests.slice(asked)).toEqual([READ_PERMISSIONS]);
+    // What the firewall was given is the narrow token, not the wide one.
+    expect(steps.slice(done)).toEqual([
+      {
+        kind: "policy",
+        policy: leasePolicy("shell", TOKEN, "factory-lease-9"),
+      },
+      { kind: "policy", policy: "allow-all" },
     ]);
+    expect(JSON.stringify(steps.slice(done))).not.toContain("ghs_WIDE_TOKEN");
   });
 
   test("an installation without the optional permissions still gets a shell lease, on the required read set", async () => {
@@ -869,6 +946,195 @@ describe("withShellLease: the lease a shell command runs under", () => {
   });
 });
 
+describe("ending a lease: the credential comes off the firewall, or the caller hears about it", () => {
+  const RESET_FAILED =
+    "The command finished, but its GitHub credential could not be taken off the sandbox's network policy.";
+  const fetchOf = (...args: string[]) => {
+    const parsed = parseGitFetch(args);
+    if (!parsed.ok) {
+      throw new Error(parsed.reason);
+    }
+    return parsed.commandLine;
+  };
+
+  /** Every way a lease is held, each returning something a test can check. */
+  const LEASES: [
+    name: string,
+    run: (
+      sandbox: LeaseSandbox,
+      dependencies: LeaseDependencies
+    ) => Promise<unknown>,
+    expected: unknown,
+  ][] = [
+    [
+      "runGh",
+      (sandbox, dependencies) =>
+        runGh(sandbox, gh("issue", "view", "12"), "repo-read", dependencies),
+      { exitCode: 0, stderr: "", stdout: "done", truncated: false },
+    ],
+    [
+      "runGitPush",
+      (sandbox, dependencies) => runGitPush(sandbox, "factory/x", dependencies),
+      { exitCode: 0, stderr: "", stdout: "done", truncated: false },
+    ],
+    [
+      "runGitFetch",
+      (sandbox, dependencies) =>
+        runGitFetch(sandbox, fetchOf("origin", "main"), dependencies),
+      { exitCode: 0, stderr: "", stdout: "done", truncated: false },
+    ],
+    [
+      "runLeasedGitCommand",
+      (sandbox, dependencies) =>
+        runLeasedGitCommand(sandbox, "/usr/bin/git clone x", dependencies),
+      { exitCode: 0, stderr: "", stdout: "done", truncated: false },
+    ],
+    [
+      "withShellLease",
+      (sandbox, dependencies) =>
+        withShellLease(
+          sandbox,
+          dependencies,
+          async () => "what the shell said"
+        ),
+      "what the shell said",
+    ],
+  ];
+
+  const resetsOf = (steps: readonly Step[]) =>
+    steps.filter(
+      (step) => step.kind === "policy" && step.policy === "allow-all"
+    );
+
+  test("the reset is tried three times", () => {
+    expect(LEASE_RESET_ATTEMPTS).toBe(3);
+  });
+
+  describe.each(LEASES)("%s", (_name, run, expected) => {
+    test.each([1, 2])(
+      "a reset that fails %i time(s) and then works leaves the lease ended and the result returned",
+      async (failures) => {
+        const { sandbox, steps } = fakeSandbox(() => ({ stdout: "done" }), {
+          resetFailures: failures,
+        });
+        const { mint } = mintOk();
+        expect(await run(sandbox, { mint })).toEqual(expected);
+        // One try per failure, and the one that worked; nothing after it.
+        expect(resetsOf(steps)).toHaveLength(failures + 1);
+        expect(steps.slice(-(failures + 1))).toEqual(
+          new Array(failures + 1).fill({ kind: "policy", policy: "allow-all" })
+        );
+        // The credential went on once.
+        expect(steps.filter((step) => step.kind === "policy")).toHaveLength(
+          failures + 2
+        );
+      }
+    );
+
+    test("a reset that fails three times throws, with the last failure as its cause, and is not tried a fourth time", async () => {
+      const { sandbox, steps } = fakeSandbox(() => ({ stdout: "done" }), {
+        resetFailures: 3,
+      });
+      const { mint } = mintOk();
+      const error: unknown = await run(sandbox, { mint }).then(
+        () => "no error",
+        (thrown: unknown) => thrown
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(RESET_FAILED);
+      expect((error as Error).cause).toEqual(
+        new Error("sandbox API unavailable (reset 3)")
+      );
+      expect(resetsOf(steps)).toHaveLength(3);
+    });
+
+    test("the lease after one that could not be taken off still runs, and its own reset is what clears the firewall", async () => {
+      const { sandbox, steps } = fakeSandbox(() => ({ stdout: "done" }), {
+        resetFailures: 3,
+      });
+      const { mint } = mintOk();
+      const first = run(sandbox, { mint });
+      const second = run(sandbox, { mint });
+      await expect(first).rejects.toThrow(RESET_FAILED);
+      expect(await second).toEqual(expected);
+      expect(steps.at(-1)).toEqual({ kind: "policy", policy: "allow-all" });
+      expect(resetsOf(steps)).toHaveLength(4);
+    });
+  });
+
+  test("the message says the command itself finished, and nothing about a token", () => {
+    expect(RESET_FAILED).toMatch(/^The command finished, but /);
+    expect(RESET_FAILED).not.toContain(TOKEN);
+  });
+});
+
+describe("every command the runtime runs under a lease has a time limit", () => {
+  const fetchOf = (...args: string[]) => {
+    const parsed = parseGitFetch(args);
+    if (!parsed.ok) {
+      throw new Error(parsed.reason);
+    }
+    return parsed.commandLine;
+  };
+
+  test("the limits: a gh command, a push or fetch, and a first clone", () => {
+    expect(GH_TIMEOUT_MS).toBe(90_000);
+    expect(GIT_TIMEOUT_MS).toBe(110_000);
+    // Generous, for a first clone of a large repository, but not forever.
+    expect(LEASED_GIT_TIMEOUT_MS).toBe(10 * 60 * 1000);
+  });
+
+  test.each<
+    [
+      string,
+      (sandbox: LeaseSandbox, mint: TokenMinter) => Promise<unknown>,
+      number,
+    ]
+  >([
+    [
+      "runGh",
+      (sandbox, mint) =>
+        runGh(sandbox, gh("issue", "view", "12"), "repo-read", { mint }),
+      GH_TIMEOUT_MS,
+    ],
+    [
+      "runGitPush",
+      (sandbox, mint) => runGitPush(sandbox, "factory/x", { mint }),
+      GIT_TIMEOUT_MS,
+    ],
+    [
+      "runGitFetch",
+      (sandbox, mint) =>
+        runGitFetch(sandbox, fetchOf("origin", "main"), { mint }),
+      GIT_TIMEOUT_MS,
+    ],
+    // A stalled clone or checkout would otherwise hold the lease, and with
+    // it the sandbox's queue, for as long as the sandbox lives.
+    [
+      "runLeasedGitCommand",
+      (sandbox, mint) =>
+        runLeasedGitCommand(sandbox, "/usr/bin/git clone x", { mint }),
+      LEASED_GIT_TIMEOUT_MS,
+    ],
+  ])(
+    "%s hands the sandbox an abort signal that fires after its limit",
+    async (_name, run, limit) => {
+      const timeout = vi.spyOn(AbortSignal, "timeout");
+      const { sandbox, signals } = fakeSandbox();
+      const { mint } = mintOk();
+      await run(sandbox, mint);
+      expect(signals).toHaveLength(1);
+      const [signal] = signals;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal?.aborted).toBe(false);
+      // The signal is the one made for this command's limit.
+      expect(timeout).toHaveBeenCalledTimes(1);
+      expect(timeout).toHaveBeenCalledWith(limit);
+      expect(timeout.mock.results[0]?.value).toBe(signal);
+    }
+  );
+});
+
 describe("leases on one sandbox never overlap", () => {
   test("concurrent calls run one after another, each inside its own set/reset pair", async () => {
     const order: string[] = [];
@@ -937,7 +1203,11 @@ describe("leases on one sandbox never overlap", () => {
     const sandbox: LeaseSandbox = {
       name: "sbx_shared_shell",
       run: async ({ command }) => {
-        order.push(`run:${command.split(" ").slice(0, 3).join(" ")}`);
+        // What the runtime wrote, after the guard its git commands start with.
+        const written = command.startsWith(GUARD)
+          ? command.slice(GUARD.length)
+          : command;
+        order.push(`run:${written.split(" ").slice(0, 3).join(" ")}`);
         return { exitCode: 0, stderr: "", stdout: "" };
       },
       setNetworkPolicy: async (policy) => {
@@ -1219,7 +1489,392 @@ describe("token scopes", () => {
     );
     expect(requests).toEqual([READ_PERMISSIONS]);
   });
+});
 
+/*
+ * A strict mint is for a credential a shell command will hold, where the
+ * scope is the only limit there is. It keeps its own counsel: it neither
+ * reads nor writes what the other mints remember, walks the scope's own
+ * rungs every time, and remembers only that it was refused, briefly.
+ */
+describe("strict minting", () => {
+  const SCOPES = ["repo-read", "repo-triage", "repo-push"] as const;
+  const rungsOf = (scope: TokenScope): (readonly string[])[] => {
+    const { optional, required } = TOKEN_SCOPES[scope];
+    return optional.length > 0
+      ? [[...required, ...optional], required]
+      : [required];
+  };
+
+  /**
+   * A connector whose behaviour a test can change as it goes: which
+   * permission sets it mints, at what time, counting every request.
+   */
+  const connector = (
+    grants: (permissions: readonly string[] | null) => boolean
+  ) => {
+    const state = { clock: 5_000_000, grants, installationCalls: 0 };
+    const requests: (readonly string[] | null)[] = [];
+    const dependencies = {
+      installationToken: async () => {
+        state.installationCalls += 1;
+        return "ghs_INSTALLATION_TOKEN";
+      },
+      mint: (async (permissions) => {
+        requests.push(permissions);
+        if (!state.grants(permissions)) {
+          throw new Error("422: the installation refused these permissions");
+        }
+        return permissions === null
+          ? "ghs_WIDE_REPOSITORY_TOKEN"
+          : `ghs_narrow_${permissions.length}`;
+      }) satisfies TokenMinter,
+      now: () => state.clock,
+    };
+    const strict = (scope: TokenScope) =>
+      mintScopedToken(scope, dependencies, { strict: true });
+    const lenient = (scope: TokenScope) => mintScopedToken(scope, dependencies);
+    return { dependencies, lenient, requests, state, strict };
+  };
+  const wideOnly = (permissions: readonly string[] | null) =>
+    permissions === null;
+  const nothing = () => false;
+  const everything = () => true;
+  const withoutOptional = (permissions: readonly string[] | null) =>
+    permissions !== null && !permissions.includes("checks:read");
+
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  test("the refusal is remembered for a minute", () => {
+    expect(STRICT_REFUSAL_TTL_MS).toBe(60_000);
+    // Much shorter than the other memo, so one blip does not cost a
+    // deployment its shell credential for long.
+    expect(STRICT_REFUSAL_TTL_MS).toBeLessThan(SCOPE_DOWNGRADE_TTL_MS);
+  });
+
+  describe("is independent of what the other mints remember", () => {
+    test.each(["repository", "installation"])(
+      "a wide token remembered for the runner (FACTORY_TOKEN_FALLBACK=%s) is not consulted: the strict mint asks for the scope's own rungs and takes the narrow token it is given",
+      async (setting) => {
+        vi.stubEnv("FACTORY_TOKEN_FALLBACK", setting);
+        const app = connector(setting === "repository" ? wideOnly : nothing);
+        // The runner ends up on the widest rung the setting allows.
+        expect(await app.lenient("repo-read")).toBe(
+          setting === "repository"
+            ? "ghs_WIDE_REPOSITORY_TOKEN"
+            : "ghs_INSTALLATION_TOKEN"
+        );
+        const asked = app.requests.length;
+        const { installationCalls } = app.state;
+
+        // The connector narrows after all (the refusals were a blip).
+        app.state.grants = everything;
+        expect(await app.strict("repo-read")).toBe(
+          `ghs_narrow_${READ_PERMISSIONS.length}`
+        );
+        expect(app.requests.slice(asked)).toEqual([READ_PERMISSIONS]);
+        expect(app.state.installationCalls).toBe(installationCalls);
+
+        // And the runner's memory is as it was: it goes straight back to
+        // the rung it remembered, not to the one the strict mint found.
+        const before = app.requests.length;
+        await app.lenient("repo-read");
+        expect(app.requests.slice(before)).toEqual(
+          setting === "repository" ? [null] : []
+        );
+        expect(app.state.installationCalls).toBe(
+          setting === "repository" ? installationCalls : installationCalls + 1
+        );
+      }
+    );
+
+    test("a wide token remembered for the runner does not stand in when the scope's own rungs are refused", async () => {
+      vi.stubEnv("FACTORY_TOKEN_FALLBACK", "repository");
+      const app = connector(wideOnly);
+      await app.lenient("repo-read");
+      const asked = app.requests.length;
+      await expect(app.strict("repo-read")).rejects.toBeInstanceOf(
+        NarrowTokenError
+      );
+      expect(app.requests.slice(asked)).toEqual(rungsOf("repo-read"));
+    });
+
+    test("a lower rung remembered for the runner is not where a strict mint starts: it asks from the top", async () => {
+      const app = connector(withoutOptional);
+      expect(await app.lenient("repo-read")).toBe("ghs_narrow_3");
+      // Remembered: the runner asks for the required set alone from now on.
+      const asked = app.requests.length;
+      await app.lenient("repo-read");
+      expect(app.requests.slice(asked)).toEqual([
+        TOKEN_SCOPES["repo-read"].required,
+      ]);
+
+      const before = app.requests.length;
+      expect(await app.strict("repo-read")).toBe("ghs_narrow_3");
+      expect(app.requests.slice(before)).toEqual(rungsOf("repo-read"));
+    });
+
+    test("a strict mint that succeeds writes nothing the other mints read", async () => {
+      const app = connector(withoutOptional);
+      expect(await app.strict("repo-read")).toBe("ghs_narrow_3");
+      expect(app.requests).toEqual(rungsOf("repo-read"));
+      // Had it been remembered, this would ask for the required set alone.
+      const asked = app.requests.length;
+      await app.lenient("repo-read");
+      expect(app.requests.slice(asked)).toEqual(rungsOf("repo-read"));
+      // And a strict mint remembers no rung of its own either.
+      const before = app.requests.length;
+      await app.strict("repo-read");
+      expect(app.requests.slice(before)).toEqual(rungsOf("repo-read"));
+    });
+
+    test.each(["", "repository", "installation"])(
+      "a strict refusal does not stop the runner (FACTORY_TOKEN_FALLBACK=%j): it walks its own ladder as if nothing had happened",
+      async (setting) => {
+        vi.stubEnv("FACTORY_TOKEN_FALLBACK", setting);
+        const app = connector(wideOnly);
+        await expect(app.strict("repo-read")).rejects.toBeInstanceOf(
+          NarrowTokenError
+        );
+        expect(app.requests).toEqual(rungsOf("repo-read"));
+
+        const asked = app.requests.length;
+        const attempt = app.lenient("repo-read");
+        if (setting === "") {
+          await expect(attempt).rejects.toBeInstanceOf(NarrowTokenError);
+          expect(app.requests.slice(asked)).toEqual(rungsOf("repo-read"));
+        } else {
+          expect(await attempt).toBe("ghs_WIDE_REPOSITORY_TOKEN");
+          expect(app.requests.slice(asked)).toEqual([
+            ...rungsOf("repo-read"),
+            null,
+          ]);
+        }
+      }
+    );
+  });
+
+  describe("never returns a token wider than the scope", () => {
+    test.each(SCOPES)(
+      "%s: with every setting and every memory the runner can have, the minter is never asked for the app's full permissions and the installation token is never fetched",
+      async (scope) => {
+        for (const setting of ["", "repository", "installation"]) {
+          for (const primed of [false, true]) {
+            resetTokenScopeMemo();
+            vi.stubEnv("FACTORY_TOKEN_FALLBACK", setting);
+            const app = connector(
+              setting === "installation" ? nothing : wideOnly
+            );
+            if (primed) {
+              // Leaves whatever the setting allows in the runner's memory.
+              await app.lenient(scope).catch(() => undefined);
+            }
+            const asked = app.requests.length;
+            const { installationCalls } = app.state;
+            const attempt = app.strict(scope);
+            await expect(attempt).rejects.toBeInstanceOf(NarrowTokenError);
+            await expect(attempt).rejects.toThrow(
+              `Could not mint a GitHub token for scope "${scope}" with permissions [${TOKEN_SCOPES[scope].required.join(", ")}].`
+            );
+            expect(app.requests.slice(asked)).toEqual(rungsOf(scope));
+            expect(app.state.installationCalls).toBe(installationCalls);
+          }
+        }
+      }
+    );
+
+    test("the token it does return is the one minted for the first of the scope's rungs that is granted", async () => {
+      const full = connector(everything);
+      expect(await full.strict("repo-read")).toBe(
+        `ghs_narrow_${READ_PERMISSIONS.length}`
+      );
+      const required = connector(withoutOptional);
+      expect(await required.strict("repo-triage")).toBe("ghs_narrow_3");
+      expect(required.requests).toEqual(rungsOf("repo-triage"));
+      const push = connector(everything);
+      expect(await push.strict("repo-push")).toBe("ghs_narrow_1");
+      expect(push.requests).toEqual([["contents:write"]]);
+    });
+
+    test("an empty token is a refusal, not a credential", async () => {
+      const requests: (readonly string[] | null)[] = [];
+      await expect(
+        mintScopedToken(
+          "repo-read",
+          {
+            mint: async (permissions) => {
+              requests.push(permissions);
+              return "";
+            },
+          },
+          { strict: true }
+        )
+      ).rejects.toBeInstanceOf(NarrowTokenError);
+      expect(requests).toEqual(rungsOf("repo-read"));
+    });
+
+    test("the refusal carries the connector's last error as its cause", async () => {
+      const app = connector(nothing);
+      const error: unknown = await app
+        .strict("repo-read")
+        .catch((thrown) => thrown);
+      expect(error).toBeInstanceOf(NarrowTokenError);
+      expect((error as Error).cause).toEqual(
+        new Error("422: the installation refused these permissions")
+      );
+    });
+  });
+
+  describe("remembers a refusal for STRICT_REFUSAL_TTL_MS, and no longer", () => {
+    test("while it is remembered the minter is not called again; once it has passed, it is", async () => {
+      const app = connector(nothing);
+      const start = app.state.clock;
+      await expect(app.strict("repo-read")).rejects.toBeInstanceOf(
+        NarrowTokenError
+      );
+      expect(app.requests).toEqual(rungsOf("repo-read"));
+
+      // Straight away, half-way, and one millisecond before the end.
+      for (const elapsed of [0, 30_000, STRICT_REFUSAL_TTL_MS - 1]) {
+        app.state.clock = start + elapsed;
+        const attempt = app.strict("repo-read");
+        await expect(attempt).rejects.toBeInstanceOf(NarrowTokenError);
+        await expect(attempt).rejects.toThrow(
+          /Could not mint a GitHub token for scope "repo-read"/
+        );
+      }
+      expect(app.requests).toEqual(rungsOf("repo-read"));
+
+      // At the end of the minute it asks again.
+      app.state.clock = start + STRICT_REFUSAL_TTL_MS;
+      await expect(app.strict("repo-read")).rejects.toBeInstanceOf(
+        NarrowTokenError
+      );
+      expect(app.requests).toEqual([
+        ...rungsOf("repo-read"),
+        ...rungsOf("repo-read"),
+      ]);
+    });
+
+    test("a refusal remembered at the second failure lasts a minute from then, not from the first", async () => {
+      const app = connector(nothing);
+      const start = app.state.clock;
+      await app.strict("repo-read").catch(() => undefined);
+      app.state.clock = start + STRICT_REFUSAL_TTL_MS;
+      await app.strict("repo-read").catch(() => undefined);
+      const asked = app.requests.length;
+      app.state.clock = start + 2 * STRICT_REFUSAL_TTL_MS - 1;
+      await expect(app.strict("repo-read")).rejects.toBeInstanceOf(
+        NarrowTokenError
+      );
+      expect(app.requests).toHaveLength(asked);
+    });
+
+    test("a connector that narrows again is found out when the minute is up, and not before", async () => {
+      const app = connector(nothing);
+      const start = app.state.clock;
+      await app.strict("repo-read").catch(() => undefined);
+      app.state.grants = everything;
+
+      app.state.clock = start + STRICT_REFUSAL_TTL_MS - 1;
+      await expect(app.strict("repo-read")).rejects.toBeInstanceOf(
+        NarrowTokenError
+      );
+      app.state.clock = start + STRICT_REFUSAL_TTL_MS;
+      expect(await app.strict("repo-read")).toBe(
+        `ghs_narrow_${READ_PERMISSIONS.length}`
+      );
+      // And from then on every strict mint asks, and is answered.
+      expect(await app.strict("repo-read")).toBe(
+        `ghs_narrow_${READ_PERMISSIONS.length}`
+      );
+      expect(app.requests).toEqual([
+        ...rungsOf("repo-read"),
+        READ_PERMISSIONS,
+        READ_PERMISSIONS,
+      ]);
+    });
+
+    test("the refusal is kept per scope", async () => {
+      const app = connector(
+        (permissions) => permissions?.includes("contents:write") ?? false
+      );
+      await expect(app.strict("repo-read")).rejects.toBeInstanceOf(
+        NarrowTokenError
+      );
+      const asked = app.requests.length;
+      expect(await app.strict("repo-push")).toBe("ghs_narrow_1");
+      expect(app.requests.slice(asked)).toEqual([["contents:write"]]);
+    });
+
+    test("it stops strict mints only: the runner still asks the connector meanwhile", async () => {
+      const app = connector(nothing);
+      await app.strict("repo-read").catch(() => undefined);
+      app.state.grants = everything;
+      const asked = app.requests.length;
+      expect(await app.lenient("repo-read")).toBe(
+        `ghs_narrow_${READ_PERMISSIONS.length}`
+      );
+      expect(app.requests.slice(asked)).toEqual([READ_PERMISSIONS]);
+      // The runner's success does not lift the strict refusal either.
+      await expect(app.strict("repo-read")).rejects.toBeInstanceOf(
+        NarrowTokenError
+      );
+      expect(app.requests).toHaveLength(asked + 1);
+    });
+
+    test("resetTokenScopeMemo forgets the refusal, so the next strict mint asks at once", async () => {
+      const app = connector(nothing);
+      await app.strict("repo-read").catch(() => undefined);
+      const asked = app.requests.length;
+      await app.strict("repo-read").catch(() => undefined);
+      expect(app.requests).toHaveLength(asked);
+
+      resetTokenScopeMemo();
+      app.state.grants = everything;
+      expect(await app.strict("repo-read")).toBe(
+        `ghs_narrow_${READ_PERMISSIONS.length}`
+      );
+      expect(app.requests.slice(asked)).toEqual([READ_PERMISSIONS]);
+    });
+
+    test("resetTokenScopeMemo forgets what the runner remembered as well", async () => {
+      const app = connector(withoutOptional);
+      await app.lenient("repo-read");
+      resetTokenScopeMemo();
+      const asked = app.requests.length;
+      await app.lenient("repo-read");
+      expect(app.requests.slice(asked)).toEqual(rungsOf("repo-read"));
+    });
+  });
+
+  test("withShellLease mints strictly: a shell command waits out the same minute, with no policy set and the command never started", async () => {
+    const app = connector(nothing);
+    const { sandbox, steps } = fakeSandbox();
+    let started = 0;
+    const attempt = () =>
+      withShellLease(sandbox, app.dependencies, async () => {
+        started += 1;
+        return "ran";
+      });
+    await expect(attempt()).rejects.toBeInstanceOf(NarrowTokenError);
+    app.state.grants = everything;
+    app.state.clock += STRICT_REFUSAL_TTL_MS - 1;
+    await expect(attempt()).rejects.toBeInstanceOf(NarrowTokenError);
+    expect(app.requests).toEqual(rungsOf("repo-read"));
+    expect(started).toBe(0);
+    expect(steps).toEqual([]);
+
+    app.state.clock += 1;
+    expect(await attempt()).toBe("ran");
+    expect(started).toBe(1);
+    expect(app.requests).toEqual([...rungsOf("repo-read"), READ_PERMISSIONS]);
+  });
+});
+
+describe("token scopes: failures and fallbacks", () => {
   test("the failure names the permissions to check and the setting that would allow a wider token", async () => {
     await expect(
       mintScopedToken("repo-triage", {

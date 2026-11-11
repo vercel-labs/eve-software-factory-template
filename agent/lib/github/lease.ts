@@ -29,7 +29,7 @@ import { mintInstallationToken } from "./git-remote.js";
  * repository alone, and to the permissions that class of command needs
  * ({@link TOKEN_SCOPES}). A scope never widens on its own: see
  * {@link mintScopedToken}. The scope is the backstop behind the allowlist
- * in `cli.ts`: every agent has a shell in its sandbox, so whatever a
+ * in `cli.ts`: where an agent has a shell in its sandbox, whatever a
  * process there might do with a lease is bounded by what the leased token
  * can do. No scope outside `repo-push` can write repository contents, which
  * is what merging and pushing both need.
@@ -146,6 +146,7 @@ const resolvedScopes = new Map<TokenScope, ResolvedScope>();
 /** Clears the per-scope memo. For tests. */
 export const resetTokenScopeMemo = (): void => {
   resolvedScopes.clear();
+  strictRefusals.clear();
 };
 
 /**
@@ -206,9 +207,6 @@ export interface MintOptions {
   readonly strict?: boolean;
 }
 
-const isWide = (rung: Rung): boolean =>
-  rung === null || rung === "installation";
-
 /** No token could be minted within a scope's own permissions. */
 export class NarrowTokenError extends Error {
   constructor(scope: TokenScope, required: readonly string[], cause?: unknown) {
@@ -219,6 +217,42 @@ export class NarrowTokenError extends Error {
     this.name = "NarrowTokenError";
   }
 }
+
+/**
+ * How long a refusal to narrow is remembered for strict callers.
+ *
+ * @remarks
+ * Short, so that one transient failure does not leave a deployment without
+ * a shell credential for long, and long enough that a deployment whose app
+ * cannot narrow at all does not pay two failed requests on every command.
+ */
+export const STRICT_REFUSAL_TTL_MS = 60 * 1000;
+
+const strictRefusals = new Map<TokenScope, number>();
+
+/** Walks a scope's own rungs only, remembering a refusal briefly. */
+const mintStrict = async (
+  scope: TokenScope,
+  request: (rung: Rung) => Promise<string>,
+  now: () => number
+): Promise<string> => {
+  const { optional, required } = permissionsFor(scope);
+  const rungs: Rung[] = [
+    [...required, ...optional],
+    ...(optional.length > 0 ? [required] : []),
+  ];
+  let lastError: unknown;
+  for (const rung of rungs) {
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: each rung is only tried when the one above it was refused
+      return await request(rung);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  strictRefusals.set(scope, now() + STRICT_REFUSAL_TTL_MS);
+  throw new NarrowTokenError(scope, required, lastError);
+};
 
 /**
  * Mints a token for `scope`.
@@ -273,14 +307,14 @@ export const mintScopedToken = async (
   };
 
   const remembered = resolvedScopes.get(scope);
-  if (
-    strict &&
-    remembered &&
-    remembered.expiresAt > now() &&
-    isWide(remembered.permissions)
-  ) {
-    // Narrowing was refused moments ago; asking again would only fail twice more.
-    throw new NarrowTokenError(scope, required);
+  if (strict) {
+    if ((strictRefusals.get(scope) ?? 0) > now()) {
+      // Narrowing was refused moments ago; asking again would only fail twice more.
+      throw new NarrowTokenError(scope, required);
+    }
+    // A wide token that worked for a command the runtime ran says nothing a
+    // strict caller can use, so only the scope's own rungs are walked.
+    return await mintStrict(scope, request, now);
   }
   if (remembered && remembered.expiresAt > now()) {
     try {
@@ -292,7 +326,7 @@ export const mintScopedToken = async (
     }
   }
 
-  const fallback = strict ? "none" : tokenFallback();
+  const fallback = tokenFallback();
   const ladder: Rung[] = [
     [...required, ...optional],
     ...(optional.length > 0 ? [required] : []),
@@ -409,6 +443,7 @@ export interface CliResult {
 export const MAX_OUTPUT_CHARACTERS = 60_000;
 export const GH_TIMEOUT_MS = 90_000;
 export const GIT_TIMEOUT_MS = 110_000;
+export const LEASED_GIT_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * One lease at a time per sandbox.
@@ -464,6 +499,36 @@ const clean = (
   };
 };
 
+export const LEASE_RESET_ATTEMPTS = 3;
+
+/**
+ * Takes the credential off the sandbox's firewall.
+ *
+ * @remarks
+ * A lease that is not taken off leaves its token attached until the next
+ * lease on that sandbox or the token's expiry, so one failed call is not
+ * the end of it: the reset is tried a few times before the failure is
+ * reported.
+ */
+const endLease = async (
+  sandbox: Pick<LeaseSandbox, "setNetworkPolicy">
+): Promise<void> => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < LEASE_RESET_ATTEMPTS; attempt += 1) {
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: a retry only follows a failure
+      await sandbox.setNetworkPolicy("allow-all");
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(
+    "The command finished, but its GitHub credential could not be taken off the sandbox's network policy.",
+    { cause: lastError }
+  );
+};
+
 export interface LeaseDependencies extends MintDependencies {
   /** Makes the per-lease placeholder. Injected by tests. */
   readonly id?: () => string;
@@ -477,7 +542,7 @@ interface LeasedCommand {
    * top; a log is read from the bottom, where the failure is.
    */
   readonly keep?: "head" | "tail";
-  /** Omit for a command with no time limit of its own (the initial clone). */
+  /** Omit for a command with no time limit of its own. */
   readonly timeoutMs?: number;
   readonly workingDirectory?: string;
 }
@@ -521,7 +586,7 @@ const withLease = (
         truncated: stdout.truncated || stderr.truncated,
       };
     } finally {
-      await sandbox.setNetworkPolicy("allow-all");
+      await endLease(sandbox);
     }
   });
 
@@ -568,7 +633,7 @@ export const withShellLease = <T>(
             .replaceAll(token, "[redacted]"),
       });
     } finally {
-      await sandbox.setNetworkPolicy("allow-all");
+      await endLease(sandbox);
     }
   });
 
@@ -700,4 +765,7 @@ export const runLeasedGitCommand = (
   withLease(sandbox, "git", "repo-read", dependencies, (placeholder) => ({
     command: commandLine,
     env: gitEnvironment(placeholder),
+    // Generous, for a first clone of a large repository, but not forever:
+    // a stalled fetch would otherwise hold the lease and the sandbox's queue.
+    timeoutMs: LEASED_GIT_TIMEOUT_MS,
   }));

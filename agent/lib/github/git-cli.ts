@@ -101,6 +101,28 @@ export const parseGitPush = (args: readonly string[]): PushParseResult => {
 const git = (...parts: readonly string[]): string =>
   [GIT_BINARY, "-C", shellQuote(REPO_DIR), ...parts].join(" ");
 
+/**
+ * A shell fragment that stops the command when git's configuration files
+ * rewrite URLs.
+ *
+ * @remarks
+ * The runtime's git commands name the factory repository's URL literally,
+ * so the remote a checkout has configured cannot send them elsewhere. A
+ * `url.<base>.insteadOf` or `pushInsteadOf` rule can: git applies it to the
+ * literal URL too, and the checkout's config files are the agent's to
+ * write. The credential still only works on GitHub and, by default, only on
+ * the factory repository, so the most a rule could do is aim a command at
+ * another repository that a widened token (`FACTORY_TOKEN_FALLBACK`) also
+ * covers. This refuses to run with such a rule in any of git's config
+ * files: the checkout's own, its per-worktree file, the user's, and the
+ * system's. Rules passed through the environment are the runtime's own and
+ * are not looked at.
+ *
+ * @param path - The checkout the command runs in.
+ */
+export const rewriteGuard = (path: string): string =>
+  `for scope in --local --worktree --global --system; do if ${GIT_BINARY} -C ${shellQuote(path)} config "$scope" --includes --get-regexp '^url\\.' >/dev/null 2>&1; then echo 'A git URL rewrite (url.<base>.insteadOf) is configured in this sandbox. Remove it and run the command again.' >&2; exit 1; fi; done`;
+
 /** Prints the name of the branch checked out in the station's clone. */
 export const CURRENT_BRANCH_COMMAND = git("symbolic-ref", "--short", "HEAD");
 
@@ -112,7 +134,7 @@ export const CURRENT_BRANCH_COMMAND = git("symbolic-ref", "--short", "HEAD");
 export const pushCommandLine = (branch: string): string => {
   const ref = `refs/heads/${branch}`;
   // Keep origin/<branch> in step so `git status` tells the truth afterwards.
-  return `${git("push", shellQuote(REMOTE_URL), shellQuote(`${ref}:${ref}`))} && ${git(
+  return `${rewriteGuard(REPO_DIR)}; ${git("push", shellQuote(REMOTE_URL), shellQuote(`${ref}:${ref}`))} && ${git(
     "update-ref",
     shellQuote(`refs/remotes/origin/${branch}`),
     shellQuote(ref)
@@ -180,12 +202,12 @@ export const parseGitFetch = (args: readonly string[]): FetchParseResult => {
           (branch) => `+refs/heads/${branch}:refs/remotes/origin/${branch}`
         );
   return {
-    commandLine: git(
+    commandLine: `${rewriteGuard(REPO_DIR)}; ${git(
       "fetch",
       ...flags.map(shellQuote),
       shellQuote(REMOTE_URL),
       ...specs.map(shellQuote)
-    ),
+    )}`,
     ok: true,
   };
 };

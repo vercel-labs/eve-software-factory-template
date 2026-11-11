@@ -196,6 +196,31 @@ const strictest = (statuses: readonly ApprovalStatus[]): ApprovalStatus =>
   statuses.find((status) => status === "user-approval") ??
   "not-applicable";
 
+/**
+ * Whether a caller gets a shell on the orchestrator, or only `gh`.
+ *
+ * @remarks
+ * An unattended run works from text nobody vetted: an issue body, a pull
+ * request a stranger opened, a ticket. A shell in the orchestrator's sandbox
+ * would let that text start programs there, next to the commands the runtime
+ * runs with a credential that writes. So an unattended run on the
+ * orchestrator gets no shell at all: only whole `gh` commands, which the
+ * runtime parses and runs itself. That keeps the allowlist and this policy
+ * the limit for those runs, the way they were before the orchestrator had a
+ * shell. Stations are unaffected; their work is running code.
+ */
+export const shellAvailable = (role: ShellRole, auth: Auth): boolean =>
+  role !== "orchestrator" || !isAutonomous(auth);
+
+export const GH_ONLY =
+  "This run has no shell, only gh. Run gh commands on their own: one command, or several joined with &&, every argument written out, with no pipes and no other programs. Use --json and --jq to shape the output.";
+
+/** How many `gh` commands one bash command may hold. */
+export const MAX_GH_STEPS = 12;
+
+const BODY_FILE_NEEDS_REVIEW =
+  "This command waits for a person's approval, and they can only review what the command shows. Pass the text with --body instead of --body-file.";
+
 const ghStepDecision = (
   argv: readonly string[],
   role: ShellRole,
@@ -210,10 +235,17 @@ const ghStepDecision = (
     return denied(parsed.reason);
   }
   const { effect } = parsed.invocation;
-  if (role === "orchestrator") {
-    return ghEffectDecision(effect, auth);
+  if (role !== "orchestrator") {
+    return effect.kind === "read"
+      ? "not-applicable"
+      : denied(STATION_READS_ONLY);
   }
-  return effect.kind === "read" ? "not-applicable" : denied(STATION_READS_ONLY);
+  const decision = ghEffectDecision(effect, auth);
+  // A file's text is read when the command runs, after any approval, so an
+  // approver would be agreeing to text they never saw.
+  return decision === "user-approval" && inlined.files.length > 0
+    ? denied(BODY_FILE_NEEDS_REVIEW)
+    : decision;
 };
 
 const pushDecision = (
@@ -241,8 +273,9 @@ const pushDecision = (
  *
  * @remarks
  * - A command that talks to GitHub in no way the runtime can read in full
- *   (`plain`, `shell`) always runs: it gets no credential, or one that only
- *   reads, so there is nothing to approve.
+ *   (`plain`, `shell`) gets no credential, or one that only reads, so there
+ *   is nothing to approve. It runs, except for an unattended run on the
+ *   orchestrator, which has no shell (see {@link shellAvailable}).
  * - A list of `gh` commands is held to the allowlist and to the caller's
  *   trust class, one command at a time, and the strictest outcome decides
  *   for the list. On a station only reads run.
@@ -260,8 +293,13 @@ export function shellDecision(
   switch (analysis.kind) {
     case "plain":
     case "shell":
-      return "not-applicable";
+      return shellAvailable(role, auth) ? "not-applicable" : denied(GH_ONLY);
     case "gh":
+      if (analysis.steps.length > MAX_GH_STEPS) {
+        return denied(
+          `Run at most ${MAX_GH_STEPS} gh commands in one command.`
+        );
+      }
       return strictest(
         analysis.steps.map((step) => ghStepDecision(step.argv, role, auth))
       );

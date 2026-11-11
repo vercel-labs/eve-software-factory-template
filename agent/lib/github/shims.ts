@@ -5,7 +5,8 @@ import { GIT_BINARY } from "./git-cli.js";
  * The `gh` and `git` wrappers seeded into every factory sandbox.
  *
  * @remarks
- * Agents run `git` and `gh` in their shell as usual. The names resolve to
+ * Agents run `git` and `gh` in their shell as usual (an unattended run on
+ * the orchestrator has no shell and never reaches these). The names resolve to
  * these scripts, installed ahead of the real binaries on `PATH`
  * (`agent/lib/github/tooling.ts`), and each script ends by running the real
  * program with the caller's own arguments.
@@ -44,7 +45,7 @@ const NO_CREDENTIAL =
   "no GitHub credential is attached to this command. One is attached only when the bash command itself names gh or git, so run it directly in your bash command, not from inside a script.";
 
 /*
- * The hints are echoed from inside double quotes in a shell script, so they
+ * The hints are printed from inside double quotes in a shell script, so they
  * must not contain a quote, a dollar sign, a backtick, or a backslash
  * (`tests/github/shims.test.ts` holds them to that).
  */
@@ -78,30 +79,53 @@ case "\${1:-}" in
   ''|help|version|-h) exec "$real" "$@" ;;
 esac
 
-if [ "$1" = api ]; then
+# The command path is the first two words that are not the repository flag.
+first=''
+second=''
+skip=0
+for argument in "$@"; do
+  if [ "$skip" = 1 ]; then
+    skip=0
+    continue
+  fi
+  case "$argument" in
+    -R|--repo)
+      skip=1
+      continue
+      ;;
+    --repo=*) continue ;;
+  esac
+  if [ -z "$first" ]; then
+    first="$argument"
+  else
+    second="$argument"
+    break
+  fi
+done
+if [ "$first" = api ]; then
   path=api
 else
-  path="$1 \${2:-}"
+  path="$first $second"
 fi
 case "$path" in
   ${caseList(GH_COMMANDS)}) ;;
   *)
-    echo "gh $path is not available to the factory. Available: ${GH_COMMANDS.join(", ")}." >&2
+    printf '%s\\n' "gh $path is not available to the factory. Available: ${GH_COMMANDS.join(", ")}." >&2
     exit 2
     ;;
 esac
 
 if [ -z "\${${LEASE_VARIABLE}:-}" ] || [ -z "\${${REPO_VARIABLE}:-}" ]; then
-  echo "gh: ${NO_CREDENTIAL}" >&2
+  printf '%s\\n' "gh: ${NO_CREDENTIAL}" >&2
   exit 4
 fi
 
 case "$path" in
   ${caseList(GH_WRITE_COMMANDS)})
     if [ "\${${ROLE_VARIABLE}:-}" = orchestrator ]; then
-      echo "gh $path ${GH_WRITE_HINT}" >&2
+      printf '%s\\n' "gh $path ${GH_WRITE_HINT}" >&2
     else
-      echo "gh $path ${GH_READER_HINT}" >&2
+      printf '%s\\n' "gh $path ${GH_READER_HINT}" >&2
     fi
     exit 2
     ;;
@@ -121,7 +145,7 @@ for argument in "$@"; do
     --repo=*) other="\${argument#--repo=}" ;;
   esac
   if [ -n "$other" ] && [ "$(normalize "$other")" != "$factory" ]; then
-    echo "gh works on $${REPO_VARIABLE} only; leave out --repo." >&2
+    printf '%s\\n' "gh works on $${REPO_VARIABLE} only; leave out --repo." >&2
     exit 2
   fi
   previous="$argument"
@@ -159,13 +183,10 @@ case "$subcommand" in
   *) exec "$real" "$@" ;;
 esac
 
+# Outside a factory command (a test suite, a package manager) this is git,
+# untouched.
 if [ -z "\${${LEASE_VARIABLE}:-}" ]; then
-  "$real" "$@"
-  status=$?
-  if [ "$status" -ne 0 ]; then
-    echo "git $subcommand: if this needed GitHub, ${NO_CREDENTIAL}" >&2
-  fi
-  exit "$status"
+  exec "$real" "$@"
 fi
 
 header=$(printf 'x-access-token:%s' "$${LEASE_VARIABLE}" | base64 | tr -d '\\n')
@@ -173,9 +194,9 @@ GIT_TERMINAL_PROMPT=0 "$real" -c "http.https://github.com/.extraheader=Authoriza
 status=$?
 if [ "$status" -ne 0 ] && [ "$subcommand" = push ]; then
   if [ "\${${ROLE_VARIABLE}:-}" = implementer ]; then
-    echo "${PUSH_HINT}" >&2
+    printf '%s\\n' "${PUSH_HINT}" >&2
   else
-    echo "git push: ${NO_PUSH_HINT}" >&2
+    printf '%s\\n' "git push: ${NO_PUSH_HINT}" >&2
   fi
 fi
 exit "$status"

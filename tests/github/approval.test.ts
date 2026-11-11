@@ -2,13 +2,20 @@ import { describe, expect, test } from "vitest";
 import {
   bashPolicy,
   factoryBrainPolicy,
+  GH_ONLY,
   ghEffectDecision,
   labelDecision,
+  MAX_GH_STEPS,
+  shellAvailable,
   shellDecision,
   stationPolicy,
 } from "#lib/github/approval.js";
 import { parseGh } from "#lib/github/cli.js";
-import { analyzeCommand, type ShellAnalysis } from "#lib/github/shell.js";
+import {
+  analyzeCommand,
+  MAX_ANALYZED_LENGTH,
+  type ShellAnalysis,
+} from "#lib/github/shell.js";
 import type { ShellRole } from "#lib/github/shims.js";
 import {
   approvalContext,
@@ -26,6 +33,31 @@ const DENY = "denied";
 const ROLES = ["orchestrator", "reader", "implementer"] as const;
 const STATIONS = ["reader", "implementer"] as const;
 const CALLER_CLASSES = Object.keys(CALLERS) as CallerClass[];
+
+/**
+ * The callers nobody is watching: label intake and CI fixes, intake tickets,
+ * and the summary-only run. They work from text nobody vetted, so on the
+ * orchestrator they get no shell, only `gh`.
+ */
+const UNATTENDED = [
+  "autonomous",
+  "ticket",
+  "summary",
+] as const satisfies readonly CallerClass[];
+/** Everyone else keeps the orchestrator's shell. */
+const WITH_A_SHELL = [
+  "trusted",
+  "schedule",
+  "untrusted",
+  "anonymous",
+] as const satisfies readonly CallerClass[];
+
+/** What an unattended run on the orchestrator gets back for anything but `gh`. */
+const NO_SHELL = { reason: GH_ONLY, type: "denied" };
+
+/** What a command that waits for approval gets back when its text is in a file. */
+const BODY_FILE_NEEDS_REVIEW =
+  "This command waits for a person's approval, and they can only review what the command shows. Pass the text with --body instead of --body-file.";
 
 /**
  * The orchestrator's `bash` approval for one `gh` command, written as the
@@ -347,7 +379,7 @@ describe("the orchestrator's gh commands: the authorization matrix", () => {
 
   test("an unattended run is never asked to wait for approval, whatever the command", () => {
     for (const [, args] of MATRIX) {
-      for (const caller of ["autonomous", "ticket", "summary"] as const) {
+      for (const caller of UNATTENDED) {
         expect(outcome(decide(caller, ...args))).not.toBe(ASK);
       }
     }
@@ -373,9 +405,11 @@ describe("the orchestrator's gh commands: the authorization matrix", () => {
   });
 
   // `gh` alone prints the CLI's own help. It changes nothing and is not in
-  // the allowlist, so it is not held to it: it runs in the shell.
-  test("gh with no command, or asking for help, has nothing to approve", () => {
-    for (const command of [
+  // the allowlist, so it is not held to it: it is a shell command, and the
+  // wrapper in the sandbox passes it to the real gh. That makes it a
+  // question of who has a shell, like any other shell command.
+  describe("gh with no command, or asking for help, runs in the shell", () => {
+    const HELP = [
       "gh",
       "gh ",
       "gh;",
@@ -383,23 +417,74 @@ describe("the orchestrator's gh commands: the authorization matrix", () => {
       "gh --help",
       "gh issue comment --help",
       "gh --version",
-    ]) {
-      for (const caller of ["trusted", "autonomous", "summary"] as const) {
-        expect(outcome(decideCommand("orchestrator", caller, command))).toBe(
-          RUN
-        );
+      "gh help",
+      "gh version",
+      "gh -h",
+    ];
+
+    test.each(HELP)("%j is a shell command, not a gh list", (command) => {
+      expect(analyzeCommand(command)).toEqual({ kind: "shell" });
+    });
+
+    test.each(WITH_A_SHELL)(
+      "orchestrator, %s: there is nothing to approve",
+      (caller) => {
+        for (const command of HELP) {
+          expect(decideCommand("orchestrator", caller, command)).toBe(RUN);
+        }
       }
-    }
+    );
+
+    test.each(UNATTENDED)(
+      "orchestrator, %s: denied, because the run has no shell to ask gh about itself in",
+      (caller) => {
+        for (const command of HELP) {
+          expect(decideCommand("orchestrator", caller, command)).toEqual(
+            NO_SHELL
+          );
+        }
+      }
+    );
+
+    test.each(STATIONS)("%s: runs for every caller", (role) => {
+      for (const command of HELP) {
+        for (const caller of CALLER_CLASSES) {
+          expect(decideCommand(role, caller, command)).toBe(RUN);
+        }
+      }
+    });
   });
 
-  test("missing or empty input names nothing on GitHub, so there is nothing to approve and no credential to get", () => {
-    const policy = bashPolicy("orchestrator");
-    for (const input of [{}, undefined, { command: "" }, { command: "  \n" }]) {
-      expect(outcome(policy(approvalContext(CALLERS.trusted, input)))).toBe(
-        RUN
-      );
-    }
-    expect(analyzeCommand("")).toEqual({ kind: "plain" });
+  describe("missing or empty input names nothing on GitHub", () => {
+    const EMPTY = [{}, undefined, { command: "" }, { command: "  \n" }];
+
+    test("it is a plain command", () => {
+      expect(analyzeCommand("")).toEqual({ kind: "plain" });
+      expect(analyzeCommand("  \n")).toEqual({ kind: "plain" });
+    });
+
+    test.each(WITH_A_SHELL)(
+      "%s: there is nothing to approve and no credential to get",
+      (caller) => {
+        const policy = bashPolicy("orchestrator");
+        for (const input of EMPTY) {
+          expect(policy(approvalContext(CALLERS[caller], input))).toBe(RUN);
+        }
+      }
+    );
+
+    // Even an empty command is a shell command, and there is no shell.
+    test.each(UNATTENDED)(
+      "%s: denied like any command that is not gh",
+      (caller) => {
+        const policy = bashPolicy("orchestrator");
+        for (const input of EMPTY) {
+          expect(policy(approvalContext(CALLERS[caller], input))).toEqual(
+            NO_SHELL
+          );
+        }
+      }
+    );
   });
 
   test("a forged trusted attribute on the unattended principal changes nothing", () => {
@@ -567,13 +652,16 @@ describe("commands the runtime cannot read in full", () => {
     }
   });
 
-  test.each(ROLES)(
+  const KINDS = [
+    { kind: "plain" },
+    { kind: "shell" },
+  ] satisfies ShellAnalysis[];
+
+  // A station's work is running code, whoever started the run.
+  test.each(STATIONS)(
     "%s: plain and shell commands run for every caller class, the summary-only run included",
     (role) => {
-      for (const analysis of [
-        { kind: "plain" },
-        { kind: "shell" },
-      ] satisfies ShellAnalysis[]) {
+      for (const analysis of KINDS) {
         for (const caller of CALLER_CLASSES) {
           expect(shellDecision(analysis, role, CALLERS[caller])).toBe(RUN);
         }
@@ -585,6 +673,91 @@ describe("commands the runtime cannot read in full", () => {
       }
     }
   );
+
+  describe("the orchestrator's shell is for callers somebody answers for", () => {
+    test("the two groups below are every caller class, each once", () => {
+      expect([...UNATTENDED, ...WITH_A_SHELL].sort()).toEqual(
+        [...CALLER_CLASSES].sort()
+      );
+    });
+
+    test.each(WITH_A_SHELL)(
+      "%s: plain and shell commands run, with nothing to approve",
+      (caller) => {
+        expect(shellAvailable("orchestrator", CALLERS[caller])).toBe(true);
+        for (const analysis of KINDS) {
+          expect(shellDecision(analysis, "orchestrator", CALLERS[caller])).toBe(
+            RUN
+          );
+        }
+        for (const command of [...PLAIN, ...SHELL]) {
+          expect(decideCommand("orchestrator", caller, command)).toBe(RUN);
+        }
+      }
+    );
+
+    // An unattended run works from an issue body, a stranger's pull request,
+    // a ticket. A shell would let that text start programs next to the
+    // commands the runtime runs with a credential that writes.
+    test.each(UNATTENDED)(
+      "%s: every plain and shell command is denied and told to use gh on its own",
+      (caller) => {
+        expect(shellAvailable("orchestrator", CALLERS[caller])).toBe(false);
+        for (const analysis of KINDS) {
+          expect(
+            shellDecision(analysis, "orchestrator", CALLERS[caller])
+          ).toEqual(NO_SHELL);
+        }
+        for (const command of [...PLAIN, ...SHELL]) {
+          expect(decideCommand("orchestrator", caller, command)).toEqual(
+            NO_SHELL
+          );
+        }
+      }
+    );
+
+    test.each(UNATTENDED)(
+      "%s: a command too long to read is a shell command, so it is denied as well",
+      (caller) => {
+        const command = `gh issue comment 12 --body "${"x".repeat(MAX_ANALYZED_LENGTH)}"`;
+        expect(analyzeCommand(command)).toEqual({ kind: "shell" });
+        expect(decideCommand("orchestrator", caller, command)).toEqual(
+          NO_SHELL
+        );
+        expect(decideCommand("orchestrator", "trusted", command)).toBe(RUN);
+      }
+    );
+
+    test.each(UNATTENDED)(
+      "%s: whole gh commands are still decided by the matrix, reads included",
+      (caller) => {
+        expect(decideCommand("orchestrator", caller, "gh issue view 12")).toBe(
+          RUN
+        );
+        expect(
+          decideCommand(
+            "orchestrator",
+            caller,
+            "gh pr view 34 --json title --jq .title && gh pr diff 34"
+          )
+        ).toBe(RUN);
+      }
+    );
+
+    test.each(STATIONS)("%s: every caller has a shell", (role) => {
+      for (const caller of CALLER_CLASSES) {
+        expect(shellAvailable(role, CALLERS[caller])).toBe(true);
+      }
+    });
+
+    test("the denial says what does work, in words an agent can act on", () => {
+      expect(GH_ONLY).toBe(
+        "This run has no shell, only gh. Run gh commands on their own: one command, or several joined with &&, every argument written out, with no pipes and no other programs. Use --json and --jq to shape the output."
+      );
+      // Agent-facing text carries no em dashes.
+      expect(GH_ONLY).not.toContain("—");
+    });
+  });
 });
 
 describe("deciding takes time in proportion to the command, not to what it says", () => {
@@ -681,15 +854,93 @@ describe("a list of gh commands is decided by its strictest step", () => {
     const steps = MATRIX.map(([, args]) => ghCommand(args));
     for (const first of steps) {
       for (const second of steps) {
-        for (const caller of ["autonomous", "ticket", "summary"] as const) {
+        for (const caller of UNATTENDED) {
           expect(outcome(list(`${first} && ${second}`, caller))).not.toBe(ASK);
         }
       }
     }
   });
+
+  // Each step is a lease and a process in the sandbox, and a list is one
+  // approval, so a list has a length a person can still read.
+  describe("a list holds a dozen commands at most", () => {
+    const TOO_MANY = {
+      reason: "Run at most 12 gh commands in one command.",
+      type: "denied",
+    };
+    const SEPARATORS = [" && ", "; ", "\n"];
+    /** `count` steps: `last` at the end, reads before it. */
+    const listOf = (count: number, last = READ, separator = " && ") =>
+      [...new Array<string>(count - 1).fill(READ), last].join(separator);
+
+    test("the limit is twelve", () => {
+      expect(MAX_GH_STEPS).toBe(12);
+    });
+
+    test("the lists below are read as that many gh commands", () => {
+      for (const count of [12, 13]) {
+        for (const separator of SEPARATORS) {
+          const analysis = analyzeCommand(listOf(count, READ, separator));
+          expect(analysis.kind).toBe("gh");
+          expect(analysis.kind === "gh" && analysis.steps.length).toBe(count);
+        }
+      }
+    });
+
+    test.each(ROLES)(
+      "%s: twelve reads run for every caller, with any separator",
+      (role) => {
+        for (const separator of SEPARATORS) {
+          for (const caller of CALLER_CLASSES) {
+            expect(
+              decideCommand(role, caller, listOf(12, READ, separator))
+            ).toBe(RUN);
+          }
+        }
+      }
+    );
+
+    test("twelve steps are still decided by the strictest one", () => {
+      expect(outcome(list(listOf(12, LABEL)))).toBe(RUN);
+      expect(outcome(list(listOf(12, LABEL), "untrusted"))).toBe(ASK);
+      expect(outcome(list(listOf(12, SHIP)))).toBe(ASK);
+      const merge = list(listOf(12, MERGE));
+      expect(outcome(merge)).toBe(DENY);
+      expect(reasonOf(merge)).toMatch(/gh pr merge is not available/);
+      expect(outcome(list(listOf(12, SHIP), "autonomous"))).toBe(DENY);
+    });
+
+    test.each(ROLES)(
+      "%s: thirteen are denied for every caller, reads though they all are",
+      (role) => {
+        for (const separator of SEPARATORS) {
+          for (const caller of CALLER_CLASSES) {
+            expect(
+              decideCommand(role, caller, listOf(13, READ, separator))
+            ).toEqual(TOO_MANY);
+          }
+        }
+      }
+    );
+
+    test("the count is what denies a longer list, whatever its steps would have got", () => {
+      for (const last of [LABEL, SHIP, MERGE]) {
+        for (const count of [13, 14, 40]) {
+          expect(list(listOf(count, last))).toEqual(TOO_MANY);
+          expect(list(listOf(count, last), "untrusted")).toEqual(TOO_MANY);
+        }
+      }
+    });
+  });
 });
 
-describe("--body-file is decided like --body", () => {
+/*
+ * The file is read when the command runs, which is after any approval. So
+ * where the same command with --body would run, or be denied, the file
+ * changes nothing; where it would wait for a person, that person would be
+ * agreeing to text they never saw, and the command is denied instead.
+ */
+describe("--body-file is decided like --body, except where a person would have to approve text they cannot see", () => {
   /** The row's argv with every `--body <text>` rewritten by `spell`. */
   const withBodyFile = (
     args: readonly string[],
@@ -710,27 +961,174 @@ describe("--body-file is decided like --body", () => {
 
   const ROWS_WITH_A_BODY = MATRIX.filter(([, args]) => args.includes("--body"));
 
-  test("the matrix has rows to check this against", () => {
+  test("the matrix has rows to check this against, with every outcome among them", () => {
     expect(ROWS_WITH_A_BODY.length).toBeGreaterThanOrEqual(8);
+    const outcomes = ROWS_WITH_A_BODY.flatMap(([, , expected]) =>
+      Object.values(expected)
+    );
+    for (const each of [RUN, ASK, DENY]) {
+      expect(outcomes).toContain(each);
+    }
   });
 
   describe.each(SPELLINGS)("%s", (_spelling, spell) => {
     for (const [what, args, expected] of ROWS_WITH_A_BODY) {
-      test(`${what}: the same outcome for every caller, on every role`, () => {
+      test(`${what}: as with --body where that runs or is denied, and denied where that would wait`, () => {
         const fromFile = withBodyFile(args, spell);
         expect(fromFile).not.toContain("--body");
         const parsed = parseGh(args);
         const isRead = parsed.ok && parsed.invocation.effect.kind === "read";
         for (const caller of CALLER_CLASSES) {
-          expect(outcome(decide(caller, ...fromFile))).toBe(expected[caller]);
+          const status = decide(caller, ...fromFile);
+          if (expected[caller] === ASK) {
+            expect([caller, status]).toEqual([
+              caller,
+              { reason: BODY_FILE_NEEDS_REVIEW, type: "denied" },
+            ]);
+          } else {
+            // The same outcome, for the same reason.
+            expect([caller, status]).toEqual([caller, decide(caller, ...args)]);
+            expect(outcome(status)).toBe(expected[caller]);
+          }
+          // A station never waits for anyone, so there the file changes nothing.
           for (const role of STATIONS) {
-            expect(
-              outcome(decideCommand(role, caller, ghCommand(fromFile)))
-            ).toBe(isRead ? RUN : DENY);
+            const onStation = decideCommand(role, caller, ghCommand(fromFile));
+            expect(outcome(onStation)).toBe(isRead ? RUN : DENY);
+            expect(reasonOf(onStation)).not.toBe(BODY_FILE_NEEDS_REVIEW);
           }
         }
       });
     }
+  });
+
+  test.each<[string, CallerClass, string]>([
+    [
+      "a comment from a caller no channel vouched for",
+      "untrusted",
+      "gh issue comment 12",
+    ],
+    ["a comment from nobody in particular", "anonymous", "gh pr comment 34"],
+    [
+      "a pull request that is not a draft, where the ship gate waits even for a trusted caller",
+      "trusted",
+      "gh pr create --head factory/x --title T",
+    ],
+    [
+      "the same from a schedule turn",
+      "schedule",
+      "gh pr create --head factory/x --title T",
+    ],
+  ])(
+    "%s waits for approval with --body, and is denied with any spelling of --body-file",
+    (_name, caller, command) => {
+      expect(
+        decideCommand("orchestrator", caller, `${command} --body text`)
+      ).toBe(ASK);
+      for (const file of [
+        "--body-file notes.md",
+        "--body-file=notes.md",
+        "-F notes.md",
+        "--body-file 'my notes.md'",
+      ]) {
+        expect(
+          decideCommand("orchestrator", caller, `${command} ${file}`)
+        ).toEqual({ reason: BODY_FILE_NEEDS_REVIEW, type: "denied" });
+      }
+    }
+  );
+
+  test("the denial tells the agent to pass the text where the approver can read it", () => {
+    expect(BODY_FILE_NEEDS_REVIEW).toContain(
+      "Pass the text with --body instead of --body-file."
+    );
+    expect(
+      reasonOf(decide("untrusted", "issue", "comment", "12", "-F", "notes.md"))
+    ).toBe(BODY_FILE_NEEDS_REVIEW);
+  });
+
+  test.each<[string, CallerClass, string]>([
+    ["a trusted caller's comment", "trusted", "gh issue comment 12"],
+    ["a schedule turn's new issue", "schedule", "gh issue create --title T"],
+    [
+      "an unattended run's comment on its own thread",
+      "autonomous",
+      "gh issue comment 12",
+    ],
+    ["a summary on its own pull request", "summary", "gh pr comment 12"],
+    [
+      "a draft pull request from anyone at all",
+      "anonymous",
+      "gh pr create --draft --head factory/x --title T",
+    ],
+  ])(
+    "%s has nobody to wait for, so it runs from a file as it does from --body",
+    (_name, caller, command) => {
+      expect(
+        decideCommand("orchestrator", caller, `${command} --body text`)
+      ).toBe(RUN);
+      expect(
+        decideCommand("orchestrator", caller, `${command} --body-file notes.md`)
+      ).toBe(RUN);
+    }
+  );
+
+  test("a command that is denied anyway keeps its own reason", () => {
+    const elsewhere = decide(
+      "autonomous",
+      "issue",
+      "comment",
+      "13",
+      "-F",
+      "n.md"
+    );
+    expect(outcome(elsewhere)).toBe(DENY);
+    expect(reasonOf(elsewhere)).toContain("#12");
+    const merge = decide(
+      "untrusted",
+      "pr",
+      "merge",
+      "34",
+      "--body-file",
+      "n.md"
+    );
+    expect(outcome(merge)).toBe(DENY);
+    expect(reasonOf(merge)).toMatch(/gh pr merge is not available/);
+  });
+
+  test("an unattended run never waits, so a file never changes what it gets", () => {
+    for (const [, args] of ROWS_WITH_A_BODY) {
+      for (const [, spell] of SPELLINGS) {
+        for (const caller of UNATTENDED) {
+          expect(decide(caller, ...withBodyFile(args, spell))).toEqual(
+            decide(caller, ...args)
+          );
+        }
+      }
+    }
+  });
+
+  test("in a list, one step that waits with its text in a file denies the list", () => {
+    const read = "gh issue view 12";
+    const fromFile = "gh issue comment 12 --body-file notes.md";
+    for (const command of [`${read} && ${fromFile}`, `${fromFile}; ${read}`]) {
+      expect(decideCommand("orchestrator", "untrusted", command)).toEqual({
+        reason: BODY_FILE_NEEDS_REVIEW,
+        type: "denied",
+      });
+      // For a trusted caller the comment runs, so the list does.
+      expect(decideCommand("orchestrator", "trusted", command)).toBe(RUN);
+    }
+    // A step that waits with its text in view does not rescue it.
+    expect(
+      decideCommand("orchestrator", "trusted", `${fromFile} && gh pr ready 34`)
+    ).toBe(ASK);
+    expect(
+      decideCommand(
+        "orchestrator",
+        "untrusted",
+        `gh pr ready 34 && ${fromFile}`
+      )
+    ).toEqual({ reason: BODY_FILE_NEEDS_REVIEW, type: "denied" });
   });
 
   test("the thread a comment lands on is still read from the command, not from the file", () => {

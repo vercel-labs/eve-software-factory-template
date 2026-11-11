@@ -654,6 +654,121 @@ describe("analyzeCommand: how long a command takes to read", () => {
   ])("a command with many git options is read at once: %s", (command) => {
     expect(analyzeWithin(500, command)).toEqual({ kind: "plain" });
   });
+
+  // The check for a networked git command used to start again at every
+  // `git` and read to the end of the text each time: fifty thousand of them
+  // took minutes. It is one pass per command now, and a command too long to
+  // read is not read at all.
+  test("fifty thousand gits in a row, as long as a command may be, are read at once, and name no networked command", () => {
+    const command = "git ".repeat(50_000);
+    expect(command).toHaveLength(MAX_ANALYZED_LENGTH);
+    expect(analyzeWithin(500, command)).toEqual({ kind: "plain" });
+  });
+
+  test("480,000 characters of the same are past the limit: shell, at once", () => {
+    const command = "git ".repeat(120_000);
+    expect(command).toHaveLength(480_000);
+    expect(analyzeWithin(500, command)).toEqual({ kind: "shell" });
+  });
+
+  test.each<[string, string, string]>([
+    ["gits ending in a fetch", `${"git ".repeat(49_998)}fetch x`, "shell"],
+    ["gits, one command each", "git;".repeat(50_000), "plain"],
+    [
+      "gits, one line each, the last a fetch",
+      `${"git\n".repeat(40_000)}git fetch`,
+      "shell",
+    ],
+    ["gits between pipes", "git | ".repeat(33_000), "plain"],
+    ["fetches with no git", "fetch ".repeat(33_000), "plain"],
+    ["one git and a long tail", `git ${"x ".repeat(99_000)}`, "plain"],
+    [
+      "one git and a long tail ending in a push",
+      `git ${"x ".repeat(99_000)}push`,
+      "shell",
+    ],
+  ])("%s are read at once", (_name, command, kind) => {
+    expect(command.length).toBeLessThanOrEqual(MAX_ANALYZED_LENGTH);
+    expect(command.length).toBeGreaterThan(130_000);
+    expect(analyzeWithin(500, command)).toEqual({ kind });
+  });
+});
+
+describe("analyzeCommand: a command longer than the limit is shell, unread", () => {
+  /** `command`, padded with spaces to exactly `length` characters. */
+  const padded = (command: string, length: number): string =>
+    command.padEnd(length, " ");
+
+  test("the limit is two hundred thousand characters", () => {
+    expect(MAX_ANALYZED_LENGTH).toBe(200_000);
+  });
+
+  // `shell` is the safe side: it can only read. And here it is the only
+  // side that costs nothing to decide.
+  test.each<[string, string, string]>([
+    ["a command that names nothing on GitHub", "ls -la", "plain"],
+    ["a command with no words at all", "", "plain"],
+    ["a gh read", "gh issue view 12", "gh"],
+    ["a gh write", "gh issue comment 12 --body hi", "gh"],
+    ["a push", "git push origin factory/x", "push"],
+    ["a fetch in a pipe", "git fetch origin main | cat", "shell"],
+  ])(
+    "%s is read at the limit, and is shell one character past it",
+    (_name, command, kind) => {
+      const atLimit = padded(command, MAX_ANALYZED_LENGTH);
+      expect(atLimit).toHaveLength(MAX_ANALYZED_LENGTH);
+      expect(analyzeCommand(atLimit).kind).toBe(kind);
+      expect(analyzeCommand(`${atLimit} `)).toEqual({ kind: "shell" });
+    }
+  );
+
+  test.each([
+    ["a long word", `ls ${"a".repeat(MAX_ANALYZED_LENGTH)}`],
+    [
+      "a long quoted body",
+      `gh issue comment 12 --body '${"x".repeat(MAX_ANALYZED_LENGTH)}'`,
+    ],
+    ["a long run of new lines", "\n".repeat(MAX_ANALYZED_LENGTH + 1)],
+    ["megabytes of anything", "x".repeat(5_000_000)],
+  ])("%s past the limit is shell", (_name, command) => {
+    expect(command.length).toBeGreaterThan(MAX_ANALYZED_LENGTH);
+    expect(analyzeCommand(command)).toEqual({ kind: "shell" });
+  });
+
+  test("nothing of such a command is looked at but its length", () => {
+    // Stands in for a string and answers one question only. Any attempt to
+    // search it, split it, or turn it into text throws.
+    const touched: string[] = [];
+    const unreadable = new Proxy(
+      {},
+      {
+        get: (_target, property) => {
+          if (property === "length") {
+            return MAX_ANALYZED_LENGTH + 1;
+          }
+          touched.push(String(property));
+          throw new Error(`the command was read: ${String(property)}`);
+        },
+      }
+    ) as unknown as string;
+    expect(analyzeCommand(unreadable)).toEqual({ kind: "shell" });
+    expect(touched).toEqual([]);
+  });
+
+  test("the same stand-in at the limit is read, which is what the test above would look like if the length check were gone", () => {
+    const readable = new Proxy(
+      {},
+      {
+        get: (_target, property) => {
+          if (property === "length") {
+            return MAX_ANALYZED_LENGTH;
+          }
+          throw new Error(`the command was read: ${String(property)}`);
+        },
+      }
+    ) as unknown as string;
+    expect(() => analyzeCommand(readable)).toThrow(/the command was read/);
+  });
 });
 
 describe("a backslash outside quotes", () => {
@@ -840,6 +955,34 @@ describe("namesGitHub errs toward attaching a credential", () => {
     ["git status\necho clone"],
   ])("%j: a name in a later command does not count", (command) => {
     expect(namesGitHub(command)).toBe(false);
+  });
+
+  // Each command is looked at on its own: is there a `git`, and after the
+  // first one, one of the names.
+  test.each([
+    ["echo fetch; git status"],
+    ["echo pull && git status"],
+    ["grep -r push . | git apply"],
+    ["echo clone\ngit status"],
+    ["git status & echo fetch"],
+    ["fetch git status"],
+    ["pull; git; push"],
+  ])(
+    "%j: a name before git, or in an earlier command, does not count",
+    (command) => {
+      expect(namesGitHub(command)).toBe(false);
+      expect(analyzeCommand(command)).toEqual({ kind: "plain" });
+    }
+  );
+
+  test.each([
+    ["git status git fetch"],
+    ["echo x; git log; git pull"],
+    ["git status &\ngit ls-remote"],
+    ["ls | git -C repo clone x"],
+  ])("%j: a name after git in any one command counts", (command) => {
+    expect(namesGitHub(command)).toBe(true);
+    expect(analyzeCommand(command)).toEqual({ kind: "shell" });
   });
 });
 

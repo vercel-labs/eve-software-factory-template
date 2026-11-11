@@ -22,10 +22,10 @@ Foreman takes tasks from GitHub, Linear, or a plain HTTP request, triages each o
 
 Each station is its own agent with its own instructions, sandbox, and tools. The Reviewer sees only the pushed branch, never the Implementer's reasoning. Between runs, Foreman keeps a **factory brain**: notes about your repository that every run starts from. See [the pipeline](https://ask-foreman.dev/docs/pipeline) and [factory memory](https://ask-foreman.dev/docs/memory) for the full picture.
 
-Foreman and its stations work on GitHub the way a developer does: they run the real `git` and `gh` in their own shell. No token is ever inside a sandbox. A credential is attached for one command at a time and scoped to your one repository, and anything a shell runs gets one that only reads.
+Foreman and its stations work on GitHub the way a developer does: they run the real `git` and `gh` in their own shell. No token is ever inside a sandbox. A credential is attached for one command at a time and scoped to your one repository, and anything a shell runs gets one that only reads. When Foreman runs unattended (a labeled issue, a CI fix, an intake ticket, a pull request summary) it has no shell at all: it can issue only whole `gh` commands, which the factory checks and runs itself.
 
-- Reading works anywhere in a command, pipes included: `gh issue view`, `gh pr diff`, `git fetch`.
-- A command that changes GitHub must be the whole command: only `gh` commands, joined with `&&` when there are several, with every argument written out. Long text goes through `--body "$(cat <<'EOF' ... EOF)"` or `--body-file <path>`. The factory checks such a command against its allowlist and against who is asking, then runs it itself, outside the shell. Only Foreman makes these changes; the stations read.
+- Where an agent has a shell, reading works anywhere in a command, pipes included: `gh issue view`, `gh pr diff`, `git fetch`.
+- A command that changes GitHub must be the whole command: only `gh` commands, joined with `&&` when there are several, with every argument written out. Long text goes through `--body "$(cat <<'EOF' ... EOF)"` or `--body-file <path>`; a command that waits for a person's approval has to use `--body`, so the approver sees the text. The factory checks such a command against its allowlist and against who is asking, then runs it itself, outside the shell. Only Foreman makes these changes; the stations read.
 - `git push origin <branch>` must be the whole command too. Only the Implementer can push, and only to branches under the factory's prefix.
 
 ## How work arrives

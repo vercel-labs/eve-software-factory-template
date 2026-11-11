@@ -1,12 +1,22 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "vitest";
 import {
   CURRENT_BRANCH_COMMAND,
   GIT_BINARY,
+  parseGitFetch,
   pushCommandLine,
+  rewriteGuard,
 } from "#lib/github/git-cli.js";
 import { REMOTE_URL, REPO_DIR } from "#lib/github/git-remote.js";
 import { cloneCommand } from "#lib/github/repo-sandbox.js";
@@ -39,6 +49,9 @@ const identity = {
   GIT_COMMITTER_NAME: "Factory Test",
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_NOSYSTEM: "1",
+  // `git config --system` reads the system file even so, and the guard on
+  // the runtime's commands asks it; this machine's own file is not the test's.
+  GIT_CONFIG_SYSTEM: "/dev/null",
 };
 
 /** Plain git, as an agent runs it in its shell. Throws when git fails. */
@@ -59,13 +72,22 @@ const localize = (command: string): string =>
     .replaceAll(`'${REPO_DIR}'`, `'${checkout}'`)
     .replaceAll(GIT_BINARY, "git");
 
-/** Runs a command the runtime wrote, the way the sandbox would: through a shell. */
-const runWritten = (command: string) =>
+/**
+ * Runs a command the runtime wrote, the way the sandbox would: through a shell.
+ *
+ * @param environment - Overrides, for a test that gives git a user-level or
+ * system-level config file of its own.
+ */
+const runWritten = (
+  command: string,
+  environment: Record<string, string> = {}
+) =>
   spawnSync("bash", ["-c", localize(command)], {
     encoding: "utf8",
     env: {
       ...process.env,
       ...identity,
+      ...environment,
       GIT_CONFIG_COUNT: "4",
       GIT_CONFIG_KEY_0: `url.file://${remote}.insteadOf`,
       GIT_CONFIG_KEY_1: "core.hooksPath",
@@ -295,5 +317,272 @@ describe.skipIf(!hasGit)("the factory's git commands, run for real", () => {
     );
     // The push went to the literal URL, not to where origin now points.
     expect(git(decoy, "for-each-ref")).toBe("");
+  });
+});
+
+/*
+ * The push and the fetch name the repository's URL literally, and git still
+ * applies a `url.<base>.insteadOf` rule to a literal URL. The checkout's
+ * config is the agent's to write, so each command starts with a guard that
+ * refuses to run while any of git's config files holds such a rule.
+ *
+ * This file's own rewrite, the one that points the factory URL at the bare
+ * repository, travels in the environment (GIT_CONFIG_COUNT), which is where
+ * the runtime's own settings travel and where the guard does not look.
+ */
+describe.skipIf(!hasGit)("a URL rewrite in git's config files", () => {
+  const REFUSED =
+    "A git URL rewrite (url.<base>.insteadOf) is configured in this sandbox. Remove it and run the command again.\n";
+  let decoy = "";
+  let savedConfig = "";
+  let made = 0;
+
+  const configFile = () => join(checkout, ".git", "config");
+  const refsOf = (repository: string) => git(repository, "for-each-ref");
+  const rule = (base: string, key = "insteadOf", value = REMOTE_URL) =>
+    `[url "${base}"]\n\t${key} = ${value}\n`;
+
+  /** A branch with one new commit on it, ready to push. */
+  const newBranch = (): string => {
+    made += 1;
+    const branch = `factory/guarded-${made}`;
+    git(checkout, "checkout", "-q", "-b", branch, "origin/main");
+    commit(checkout, `guarded-${made}.txt`, `guarded work ${made}`);
+    return branch;
+  };
+
+  /** The push was stopped by the guard: nothing left the checkout. */
+  const expectRefused = (
+    pushed: ReturnType<typeof runWritten>,
+    branch: string,
+    before: { decoy: string; remote: string }
+  ) => {
+    expect(pushed.status).toBe(1);
+    expect(pushed.stderr).toBe(REFUSED);
+    expect(pushed.stdout).toBe("");
+    expect(refsOf(remote)).toBe(before.remote);
+    expect(refsOf(decoy)).toBe(before.decoy);
+    // Nor does the checkout believe the branch was delivered.
+    expect(() =>
+      git(checkout, "rev-parse", "--verify", `origin/${branch}`)
+    ).toThrow();
+  };
+
+  beforeAll(() => {
+    decoy = join(root, "rewrite-decoy.git");
+    git(root, "init", "-q", "--bare", decoy);
+  });
+
+  beforeEach(() => {
+    savedConfig = readFileSync(configFile(), "utf8");
+  });
+
+  afterEach(() => {
+    writeFileSync(configFile(), savedConfig);
+    rmSync(join(checkout, ".git", "config.worktree"), { force: true });
+  });
+
+  test("the guard is valid shell, and in a checkout with no rule it prints nothing and lets the command go on", () => {
+    const syntax = spawnSync("sh", ["-n", "-c", rewriteGuard(REPO_DIR)], {
+      encoding: "utf8",
+    });
+    expect([syntax.status, syntax.stderr]).toEqual([0, ""]);
+    const guarded = runWritten(`${rewriteGuard(REPO_DIR)}; echo went on`);
+    expect([guarded.status, guarded.stdout, guarded.stderr]).toEqual([
+      0,
+      "went on\n",
+      "",
+    ]);
+  });
+
+  test("with no rule in any file the push goes through, though the environment this test runs git in holds one", () => {
+    const branch = newBranch();
+    const pushed = runWritten(pushCommandLine(branch));
+    // The rewrite that makes the factory URL reach the bare repository here.
+    expect(pushed.status).toBe(0);
+    expect(pushed.stderr).not.toContain("A git URL rewrite");
+    expect(git(remote, "rev-parse", branch)).toBe(
+      git(checkout, "rev-parse", "HEAD")
+    );
+    expect(git(checkout, "rev-parse", `origin/${branch}`)).toBe(
+      git(checkout, "rev-parse", branch)
+    );
+    // And no config file of git's was given the rule along the way.
+    expect(readFileSync(configFile(), "utf8")).not.toMatch(/\[url /i);
+  });
+
+  test.each<[string, (decoyUrl: string) => [key: string, value: string]]>([
+    [
+      "url.<decoy>.insteadOf for the factory URL",
+      (decoyUrl) => [`url.${decoyUrl}.insteadOf`, REMOTE_URL],
+    ],
+    [
+      "url.<decoy>.pushInsteadOf for the factory URL",
+      (decoyUrl) => [`url.${decoyUrl}.pushInsteadOf`, REMOTE_URL],
+    ],
+    [
+      "a rule for all of github.com",
+      (decoyUrl) => [`url.${decoyUrl}.insteadOf`, "https://github.com/"],
+    ],
+    [
+      "a rule written in capitals",
+      (decoyUrl) => [`URL.${decoyUrl}.INSTEADOF`, REMOTE_URL],
+    ],
+    // The guard does not work out which URLs a rule would catch.
+    [
+      "a rule about some other host entirely",
+      () => [
+        "url.https://mirror.example.test/.insteadOf",
+        "https://example.test/",
+      ],
+    ],
+    [
+      "any other url.<base> setting",
+      () => ["url.https://mirror.example.test/.note", "x"],
+    ],
+  ])(
+    "%s in the checkout's .git/config: the rendered push exits 1 with the guard's message and pushes nothing",
+    (_name, setting) => {
+      const branch = newBranch();
+      const before = { decoy: refsOf(decoy), remote: refsOf(remote) };
+      git(checkout, "config", ...setting(`file://${decoy}`));
+      expectRefused(runWritten(pushCommandLine(branch)), branch, before);
+    }
+  );
+
+  test("without the guard that rule would have sent the push to the decoy, which is what the guard is for", () => {
+    const branch = newBranch();
+    const remoteBefore = refsOf(remote);
+    git(checkout, "config", `url.file://${decoy}.insteadOf`, REMOTE_URL);
+    const guard = `${rewriteGuard(REPO_DIR)}; `;
+    const written = pushCommandLine(branch);
+    expect(written.startsWith(guard)).toBe(true);
+    // The checkout's rule is longer than the environment's, so git prefers it.
+    const unguarded = runWritten(written.slice(guard.length));
+    expect(unguarded.status).toBe(0);
+    expect(refsOf(remote)).toBe(remoteBefore);
+    expect(git(decoy, "rev-parse", branch)).toBe(
+      git(checkout, "rev-parse", "HEAD")
+    );
+  });
+
+  test("a rule in a file the checkout's config includes is found as well", () => {
+    const branch = newBranch();
+    const before = { decoy: refsOf(decoy), remote: refsOf(remote) };
+    const included = join(root, "included.gitconfig");
+    writeFileSync(included, rule(`file://${decoy}`));
+    git(checkout, "config", "include.path", included);
+    expectRefused(runWritten(pushCommandLine(branch)), branch, before);
+  });
+
+  test.each<[string, string]>([
+    ["the user's config file (GIT_CONFIG_GLOBAL)", "GIT_CONFIG_GLOBAL"],
+    ["the system's config file (GIT_CONFIG_SYSTEM)", "GIT_CONFIG_SYSTEM"],
+  ])(
+    "a rule in %s is refused too, with the checkout's own config clean",
+    (_name, variable) => {
+      const branch = newBranch();
+      const before = { decoy: refsOf(decoy), remote: refsOf(remote) };
+      const file = join(root, `${variable.toLowerCase()}.gitconfig`);
+      writeFileSync(file, rule(`file://${decoy}`));
+      const environment: Record<string, string> =
+        variable === "GIT_CONFIG_SYSTEM"
+          ? { GIT_CONFIG_NOSYSTEM: "0", GIT_CONFIG_SYSTEM: file }
+          : { GIT_CONFIG_GLOBAL: file };
+      expectRefused(
+        runWritten(pushCommandLine(branch), environment),
+        branch,
+        before
+      );
+
+      // The same file without the rule changes nothing: the push goes through.
+      writeFileSync(file, "[user]\n\tname = Someone Else\n");
+      expect(runWritten(pushCommandLine(branch), environment).status).toBe(0);
+      expect(git(remote, "rev-parse", branch)).toBe(
+        git(checkout, "rev-parse", "HEAD")
+      );
+    }
+  );
+
+  test("once the rule is removed, the same command goes through, as the message says", () => {
+    const branch = newBranch();
+    const before = { decoy: refsOf(decoy), remote: refsOf(remote) };
+    const key = `url.file://${decoy}.insteadOf`;
+    git(checkout, "config", key, REMOTE_URL);
+    expectRefused(runWritten(pushCommandLine(branch)), branch, before);
+    git(checkout, "config", "--unset", key);
+    expect(runWritten(pushCommandLine(branch)).status).toBe(0);
+    expect(git(remote, "rev-parse", branch)).toBe(
+      git(checkout, "rev-parse", "HEAD")
+    );
+    expect(refsOf(decoy)).toBe(before.decoy);
+  });
+
+  describe("the fetch the runtime writes", () => {
+    const fetchOf = (...args: string[]): string => {
+      const parsed = parseGitFetch(args);
+      if (!parsed.ok) {
+        throw new Error(parsed.reason);
+      }
+      return parsed.commandLine;
+    };
+
+    let advanced = 0;
+
+    /** Moves `branch` on the remote one commit ahead of what the checkout has. */
+    const advance = (branch: string): string => {
+      const seed = join(root, "seed");
+      git(seed, "fetch", "-q", "origin");
+      git(seed, "checkout", "-q", "-B", branch, `origin/${branch}`);
+      advanced += 1;
+      commit(seed, `advance-${advanced}.txt`, "moved on the remote");
+      git(seed, "push", "-q", "origin", branch);
+      return git(remote, "rev-parse", branch);
+    };
+
+    test("with no rule in any file it brings the branch in", () => {
+      const tip = advance("factory/existing");
+      const fetched = runWritten(fetchOf("origin", "factory/existing"));
+      expect(fetched.status).toBe(0);
+      expect(git(checkout, "rev-parse", "origin/factory/existing")).toBe(tip);
+    });
+
+    test.each(["insteadOf", "pushInsteadOf"])(
+      "with url.<base>.%s in the checkout's config it exits 1 with the guard's message and fetches nothing",
+      (key) => {
+        const before = git(checkout, "rev-parse", "origin/factory/existing");
+        const tip = advance("factory/existing");
+        expect(tip).not.toBe(before);
+        git(checkout, "config", `url.file://${decoy}.${key}`, REMOTE_URL);
+        const fetched = runWritten(fetchOf("origin", "factory/existing"));
+        expect(fetched.status).toBe(1);
+        expect(fetched.stderr).toBe(REFUSED);
+        expect(fetched.stdout).toBe("");
+        expect(git(checkout, "rev-parse", "origin/factory/existing")).toBe(
+          before
+        );
+      }
+    );
+  });
+
+  /*
+   * git reads a fourth file besides the checkout's, the user's and the
+   * system's: with `extensions.worktreeConfig` on, `.git/config.worktree`,
+   * which `git config --local` leaves out and `--worktree` reads. Both the
+   * switch and the file are in the checkout, where the agent writes, so the
+   * guard asks about that file too.
+   */
+  test("a rule in the checkout's worktree config (.git/config.worktree) is refused like one in .git/config", () => {
+    const branch = newBranch();
+    const before = { decoy: refsOf(decoy), remote: refsOf(remote) };
+    git(checkout, "config", "extensions.worktreeConfig", "true");
+    git(
+      checkout,
+      "config",
+      "--worktree",
+      `url.file://${decoy}.insteadOf`,
+      REMOTE_URL
+    );
+    expectRefused(runWritten(pushCommandLine(branch)), branch, before);
   });
 });

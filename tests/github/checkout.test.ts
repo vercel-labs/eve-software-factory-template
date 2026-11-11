@@ -12,6 +12,7 @@ import {
   isCheckoutSandbox,
   planCheckout,
 } from "#lib/github/checkout.js";
+import { rewriteGuard } from "#lib/github/git-cli.js";
 import { REMOTE_URL } from "#lib/github/git-remote.js";
 import { resetTokenScopeMemo, type TokenMinter } from "#lib/github/lease.js";
 
@@ -176,13 +177,16 @@ describe("planCheckout", () => {
 });
 
 describe("checkoutCommand", () => {
-  test("uses git by absolute path, the literal repository URL, and quotes every value", () => {
+  test("uses git by absolute path, the literal repository URL, and quotes every value; once there is a repository to ask, it stops if git's config rewrites URLs", () => {
     expect(
       checkoutCommand("/workspace", { base: BASE, ref: SHA, sha: SHA })
     ).toBe(
       [
         "mkdir -p '/workspace'",
         "/usr/bin/git -C '/workspace' init -q",
+        // The workspace outlives the turn and the orchestrator's shell can
+        // write its config, so nothing is fetched while a rule is in it.
+        "{ for scope in --local --worktree --global --system; do if /usr/bin/git -C '/workspace' config \"$scope\" --includes --get-regexp '^url\\.' >/dev/null 2>&1; then echo 'A git URL rewrite (url.<base>.insteadOf) is configured in this sandbox. Remove it and run the command again.' >&2; exit 1; fi; done; }",
         "(/usr/bin/git -C '/workspace' remote remove origin >/dev/null 2>&1 || true)",
         `/usr/bin/git -C '/workspace' remote add origin '${REMOTE_URL}'`,
         `/usr/bin/git -C '/workspace' fetch --depth 1 origin '${SHA}'`,
@@ -192,6 +196,23 @@ describe("checkoutCommand", () => {
       ].join(" && ")
     );
   });
+
+  test.each(["/workspace", "/vercel/sandbox", "/tmp/it's a path"])(
+    "the guard is the one for the workspace at %s, as the step right after git init and before anything touches a remote",
+    (path) => {
+      const steps = checkoutCommand(path, {
+        base: null,
+        ref: "HEAD",
+        sha: null,
+      }).split(" && ");
+      expect(steps[1]?.endsWith(" init -q")).toBe(true);
+      expect(steps[2]).toBe(`{ ${rewriteGuard(path)}; }`);
+      expect(steps.slice(0, 2).join(" ")).not.toMatch(/remote|fetch/);
+      expect(steps.slice(3).every((step) => !step.includes("for scope"))).toBe(
+        true
+      );
+    }
+  );
 
   test("a ref that is not a commit is checked out from FETCH_HEAD", () => {
     const command = checkoutCommand("/workspace", {
@@ -367,6 +388,9 @@ describe.skipIf(!hasGit)("the checkout command, run for real", () => {
     GIT_COMMITTER_NAME: "Factory Test",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
+    // The guard asks `git config --system`, which reads the system file
+    // even so; this machine's own file is not the test's.
+    GIT_CONFIG_SYSTEM: "/dev/null",
   };
   const git = (cwd: string, ...args: string[]): string =>
     execFileSync("git", args, {
@@ -375,30 +399,50 @@ describe.skipIf(!hasGit)("the checkout command, run for real", () => {
       env: { ...process.env, ...identity },
     }).trim();
 
-  /** Runs a rendered command with the factory URL pointed at the bare repo. */
-  const runRendered = (command: string): string => {
-    const local = command.replaceAll(
+  /** The rendered command, with whichever git this machine has. */
+  const localize = (command: string): string =>
+    command.replaceAll(
       "/usr/bin/git",
       execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim()
     );
-    return execFileSync("sh", ["-c", local], {
+
+  /**
+   * The environment a rendered command runs in here: the factory URL pointed
+   * at the bare repository. That rewrite is the test's own and travels in
+   * the environment, where the command's guard does not look.
+   */
+  const rendered = (overrides: Record<string, string> = {}) => ({
+    ...process.env,
+    ...identity,
+    ...overrides,
+    GIT_CONFIG_COUNT: "4",
+    GIT_CONFIG_KEY_0: `url.file://${remote}.insteadOf`,
+    GIT_CONFIG_KEY_1: "protocol.file.allow",
+    GIT_CONFIG_KEY_2: "advice.detachedHead",
+    GIT_CONFIG_KEY_3: "uploadpack.allowAnySHA1InWant",
+    GIT_CONFIG_VALUE_0: REMOTE_URL,
+    GIT_CONFIG_VALUE_1: "always",
+    GIT_CONFIG_VALUE_2: "false",
+    GIT_CONFIG_VALUE_3: "true",
+  });
+
+  /** Runs a rendered command with the factory URL pointed at the bare repo. */
+  const runRendered = (command: string): string =>
+    execFileSync("sh", ["-c", localize(command)], {
       encoding: "utf8",
-      env: {
-        ...process.env,
-        ...identity,
-        GIT_CONFIG_COUNT: "4",
-        GIT_CONFIG_KEY_0: `url.file://${remote}.insteadOf`,
-        GIT_CONFIG_KEY_1: "protocol.file.allow",
-        GIT_CONFIG_KEY_2: "advice.detachedHead",
-        GIT_CONFIG_KEY_3: "uploadpack.allowAnySHA1InWant",
-        GIT_CONFIG_VALUE_0: REMOTE_URL,
-        GIT_CONFIG_VALUE_1: "always",
-        GIT_CONFIG_VALUE_2: "false",
-        GIT_CONFIG_VALUE_3: "true",
-      },
+      env: rendered(),
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-  };
+
+  /** The same, for a command that may fail: its status and both streams. */
+  const tryRendered = (
+    command: string,
+    overrides: Record<string, string> = {}
+  ) =>
+    spawnSync("sh", ["-c", localize(command)], {
+      encoding: "utf8",
+      env: rendered(overrides),
+    });
 
   beforeAll(() => {
     root = mkdtempSync(join(tmpdir(), "factory-checkout-"));
@@ -466,5 +510,114 @@ describe.skipIf(!hasGit)("the checkout command, run for real", () => {
     runRendered(checkoutCommand(path, { base: null, ref: head, sha: head }));
     expect(git(path, "rev-parse", "HEAD")).toBe(head);
     expect(runRendered(headCommand(path))).toBe(head);
+  });
+
+  /*
+   * The orchestrator's workspace is kept between turns, and its shell can
+   * write the repository's config there. A `url.<base>.insteadOf` rule would
+   * send the next turn's fetch, and the token leased for it, to another
+   * repository. The command stops before it fetches.
+   */
+  describe("a workspace whose git config rewrites URLs", () => {
+    const REFUSED =
+      "A git URL rewrite (url.<base>.insteadOf) is configured in this sandbox. Remove it and run the command again.\n";
+    let made = 0;
+
+    /** A workspace checked out at the base commit, as an earlier turn left it. */
+    const workspace = (): string => {
+      made += 1;
+      const path = join(root, `guarded-${made}`);
+      runRendered(checkoutCommand(path, { base: null, ref: base, sha: base }));
+      expect(git(path, "rev-parse", "HEAD")).toBe(base);
+      return path;
+    };
+    const next = (path: string) =>
+      checkoutCommand(path, { base: null, ref: head, sha: head });
+
+    /** The command stopped at the guard: the workspace is as it was. */
+    const expectRefused = (
+      result: ReturnType<typeof tryRendered>,
+      path: string
+    ) => {
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe(REFUSED);
+      expect(result.stdout).toBe("");
+      expect(git(path, "rev-parse", "HEAD")).toBe(base);
+      // The new commit was never fetched.
+      expect(
+        spawnSync("git", ["-C", path, "cat-file", "-e", `${head}^{commit}`], {
+          env: { ...process.env, ...identity },
+        }).status
+      ).not.toBe(0);
+    };
+
+    test.each<[string, (decoy: string) => [key: string, value: string]]>([
+      [
+        "url.<decoy>.insteadOf for the factory URL",
+        (decoy) => [`url.file://${decoy}.insteadOf`, REMOTE_URL],
+      ],
+      [
+        "url.<decoy>.pushInsteadOf for the factory URL",
+        (decoy) => [`url.file://${decoy}.pushInsteadOf`, REMOTE_URL],
+      ],
+      [
+        "a rule about some other host entirely",
+        () => ["url.https://mirror.example.test/.insteadOf", "https://x.test/"],
+      ],
+    ])(
+      "%s in the workspace's config: the checkout exits 1 with the guard's message, and the workspace stays where it was",
+      (_name, setting) => {
+        const path = workspace();
+        const decoy = join(root, `decoy-${made}.git`);
+        git(root, "init", "-q", "--bare", decoy);
+        git(path, "config", ...setting(decoy));
+        expectRefused(tryRendered(next(path)), path);
+        // The remote the earlier turn configured is as it was.
+        expect(git(path, "config", "--get", "remote.origin.url")).toBe(
+          REMOTE_URL
+        );
+        expect(git(decoy, "for-each-ref")).toBe("");
+      }
+    );
+
+    test("the guard runs before the remote is touched: a directory that is a repository with a rule and no remote is left with no remote", () => {
+      made += 1;
+      const path = join(root, `guarded-${made}`);
+      git(root, "init", "-q", path);
+      git(path, "config", "url.file:///nowhere.insteadOf", REMOTE_URL);
+      const result = tryRendered(next(path));
+      expect([result.status, result.stderr]).toEqual([1, REFUSED]);
+      expect(git(path, "remote")).toBe("");
+    });
+
+    test("a rule in the user's config file (GIT_CONFIG_GLOBAL) is refused too", () => {
+      const path = workspace();
+      const file = join(root, "global.gitconfig");
+      writeFileSync(
+        file,
+        `[url "file:///nowhere"]\n\tinsteadOf = ${REMOTE_URL}\n`
+      );
+      expectRefused(tryRendered(next(path), { GIT_CONFIG_GLOBAL: file }), path);
+    });
+
+    test("with the rule removed, the same command moves the workspace to the new commit", () => {
+      const path = workspace();
+      const key = "url.file:///nowhere.insteadOf";
+      git(path, "config", key, REMOTE_URL);
+      expectRefused(tryRendered(next(path)), path);
+      git(path, "config", "--unset", key);
+      const result = tryRendered(next(path));
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim().split("\n").at(-1)).toBe(head);
+      expect(git(path, "rev-parse", "HEAD")).toBe(head);
+    });
+
+    test("with no rule in any file the checkout goes through, though the environment this test runs git in holds one", () => {
+      const path = workspace();
+      const result = tryRendered(next(path));
+      expect(result.status).toBe(0);
+      expect(result.stderr).not.toContain("A git URL rewrite");
+      expect(git(path, "rev-parse", "HEAD")).toBe(head);
+    });
   });
 });

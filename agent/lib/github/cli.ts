@@ -958,10 +958,11 @@ export const shellQuote = (arg: string): string =>
  * `PATH` for a command the runtime runs itself under a lease.
  *
  * @remarks
- * `gh` shells out to `git`, and `git` to its helpers. This keeps those
- * lookups in the image's own directories: nothing in a directory the agent
- * writes to, and not the sandbox's `gh` and `git` wrappers in
- * `/usr/local/bin`, which are for the agent's shell.
+ * `gh` shells out to `git`, and `git` to its helpers. This points those
+ * lookups at the image's own directories and past the sandbox's `gh` and
+ * `git` wrappers in `/usr/local/bin`, which are for the agent's shell. It is
+ * a default, not a guarantee: the sandbox runs commands through a login
+ * shell, whose start-up files the agent can write.
  */
 export const RUNNER_PATH = "/usr/bin:/bin";
 
