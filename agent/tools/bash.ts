@@ -1,15 +1,13 @@
-import { disableTool } from "eve/tools";
+import { bashTool } from "../lib/github/tools.js";
+import { environment } from "../sandbox.js";
 
 /**
- * Disabled on the orchestrator.
+ * The orchestrator's shell, where it uses `gh` like any developer would.
  *
  * @remarks
- * The orchestrator routes work and never writes code, so it has no need to
- * run commands or change files, and its sandbox is where its `gh` tool
- * runs. Without a shell or a way to write files, the only process the
- * orchestrator can start in that sandbox is `gh` with an argv the allowlist
- * accepted, which is what makes the allowlist a real boundary. Reading the
- * checkout (`read_file`, `glob`, `grep`) is unaffected. Stations keep these
- * tools in their own sandboxes.
+ * Reads run under a read-only credential. A command that changes GitHub is
+ * parsed against the allowlist and held to the caller's trust class before
+ * the runtime runs it (`agent/lib/github/tools.ts`). The orchestrator never
+ * pushes.
  */
-export default disableTool();
+export default bashTool({ environment, role: "orchestrator" });

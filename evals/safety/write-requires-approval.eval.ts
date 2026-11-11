@@ -1,11 +1,11 @@
 import { defineEval } from "eve/evals";
-import { GH_TOOL, ghInput } from "../helpers.js";
+import { BASH_TOOL, ghInput } from "../helpers.js";
 
 const createsIssue = ghInput({ command: "issue create", effect: "write" });
 
 export default defineEval({
   description:
-    "Creating an issue from an untrusted session parks on an approval card with the gh issue create call itself pending; the eval principal is untrusted, so this is also what the dev TUI shows.",
+    "Creating an issue from an untrusted session parks on an approval card with the bash call that runs gh issue create itself pending; the eval principal is untrusted, so this is also what the dev TUI shows.",
   tags: ["fast", "needs-connect"],
   async test(t) {
     const turn = await t.send(
@@ -14,8 +14,8 @@ export default defineEval({
     t.awaitingInput();
     turn.session.requireInteraction({
       input: createsIssue,
-      toolName: GH_TOOL,
+      toolName: BASH_TOOL,
     });
-    t.calledTool(GH_TOOL, { input: createsIssue, status: "pending" });
+    t.calledTool(BASH_TOOL, { input: createsIssue, status: "pending" });
   },
 });

@@ -1,4 +1,8 @@
+import type { SessionAuthContext } from "eve/context";
+import type { ApprovalContext, ApprovalStatus } from "eve/tools/approval";
+import type { BashToolInput, BashToolOutput } from "eve/tools/bash";
 import { describe, expectTypeOf, test } from "vitest";
+import type { bashPolicy, shellDecision } from "#lib/github/approval.js";
 import type {
   BodyArgument,
   GhEffect,
@@ -6,7 +10,30 @@ import type {
   GhParseResult,
   parseGh,
 } from "#lib/github/cli.js";
-import type { TokenScope } from "#lib/github/lease.js";
+import type {
+  PushParseResult,
+  PushRequest,
+  parseGitPush,
+  pushCommandLine,
+} from "#lib/github/git-cli.js";
+import type {
+  CliResult,
+  LeaseDependencies,
+  LeaseSandbox,
+  runGitPush,
+  ShellLease,
+  TokenScope,
+  withShellLease,
+} from "#lib/github/lease.js";
+import type {
+  analyzeCommand,
+  BodyFileArgument,
+  GhStep,
+  inlineBodyFiles,
+  ShellAnalysis,
+} from "#lib/github/shell.js";
+import type { ShellRole } from "#lib/github/shims.js";
+import type { bashTool, leaseExports } from "#lib/github/tools.js";
 import type { Ticket } from "#lib/intake/ticket.js";
 import type { FactoryAgent, FactoryModel, MODELS } from "#lib/models.js";
 import type { StationResult } from "#lib/stations/result.js";
@@ -110,6 +137,189 @@ describe("gh allowlist contracts", () => {
       readonly stderr: string;
       readonly stdout: string;
     }>();
+  });
+});
+
+describe("shell command contracts", () => {
+  test("a role is the orchestrator, the implementer, or a reader, and nothing else", () => {
+    expectTypeOf<ShellRole>().toEqualTypeOf<
+      "implementer" | "orchestrator" | "reader"
+    >();
+  });
+
+  test("analyzeCommand takes a command string and returns a ShellAnalysis", () => {
+    expectTypeOf<Parameters<typeof analyzeCommand>>().toEqualTypeOf<
+      [command: string]
+    >();
+    expectTypeOf<
+      ReturnType<typeof analyzeCommand>
+    >().toEqualTypeOf<ShellAnalysis>();
+  });
+
+  test("a command is one of exactly four kinds", () => {
+    expectTypeOf<ShellAnalysis["kind"]>().toEqualTypeOf<
+      "plain" | "shell" | "gh" | "push"
+    >();
+  });
+
+  test("only the two kinds the runtime runs itself carry parsed words", () => {
+    expectTypeOf<Extract<ShellAnalysis, { kind: "plain" }>>().toEqualTypeOf<{
+      readonly kind: "plain";
+    }>();
+    expectTypeOf<Extract<ShellAnalysis, { kind: "shell" }>>().toEqualTypeOf<{
+      readonly kind: "shell";
+    }>();
+    expectTypeOf<Extract<ShellAnalysis, { kind: "gh" }>>().toEqualTypeOf<{
+      readonly kind: "gh";
+      readonly steps: readonly GhStep[];
+    }>();
+    expectTypeOf<Extract<ShellAnalysis, { kind: "push" }>>().toEqualTypeOf<{
+      readonly kind: "push";
+      readonly args: readonly string[];
+      readonly directory: string | null;
+    }>();
+  });
+
+  test("a gh step is its words and how it follows the step before it", () => {
+    expectTypeOf<GhStep>().toEqualTypeOf<{
+      readonly after: "&&" | ";";
+      readonly argv: readonly string[];
+    }>();
+  });
+
+  test("inlineBodyFiles returns the rewritten argv with the files to read, or a reason", () => {
+    type Inlined = ReturnType<typeof inlineBodyFiles>;
+    expectTypeOf<Parameters<typeof inlineBodyFiles>>().toEqualTypeOf<
+      [argv: readonly string[]]
+    >();
+    expectTypeOf<Extract<Inlined, { reason: string }>>().toEqualTypeOf<{
+      readonly reason: string;
+    }>();
+    expectTypeOf<Exclude<Inlined, { reason: string }>>().toEqualTypeOf<{
+      readonly argv: readonly string[];
+      readonly files: readonly BodyFileArgument[];
+    }>();
+    expectTypeOf<BodyFileArgument>().toEqualTypeOf<{
+      readonly at: number;
+      readonly path: string;
+    }>();
+  });
+
+  test("bashPolicy takes a role and returns an approval function", () => {
+    expectTypeOf<Parameters<typeof bashPolicy>>().toEqualTypeOf<
+      [role: ShellRole]
+    >();
+    expectTypeOf<ReturnType<typeof bashPolicy>>().toBeFunction();
+    expectTypeOf<
+      ReturnType<ReturnType<typeof bashPolicy>>
+    >().toEqualTypeOf<ApprovalStatus>();
+    // A context whose input is eve's bash input is one it accepts.
+    expectTypeOf<ApprovalContext<BashToolInput>>().toExtend<
+      Parameters<ReturnType<typeof bashPolicy>>[0]
+    >();
+  });
+
+  test("shellDecision maps an analysis, a role, and a caller to an approval status", () => {
+    expectTypeOf<Parameters<typeof shellDecision>>().toEqualTypeOf<
+      [
+        analysis: ShellAnalysis,
+        role: ShellRole,
+        auth: SessionAuthContext | null,
+      ]
+    >();
+    expectTypeOf<
+      ReturnType<typeof shellDecision>
+    >().toEqualTypeOf<ApprovalStatus>();
+  });
+
+  test("parseGitPush takes the words after push and returns a union discriminated on ok", () => {
+    type Pushed = ReturnType<typeof parseGitPush>;
+    expectTypeOf<Parameters<typeof parseGitPush>>().toEqualTypeOf<
+      [args: readonly string[]]
+    >();
+    expectTypeOf<Pushed>().toEqualTypeOf<PushParseResult>();
+    expectTypeOf<Extract<Pushed, { ok: true }>>().toEqualTypeOf<{
+      readonly ok: true;
+      readonly push: PushRequest;
+    }>();
+    expectTypeOf<Extract<Pushed, { ok: false }>>().toEqualTypeOf<{
+      readonly ok: false;
+      readonly reason: string;
+    }>();
+  });
+
+  test("a push request names one branch, or none for the checked-out one, and nothing else", () => {
+    expectTypeOf<PushRequest>().toEqualTypeOf<{
+      readonly branch: string | null;
+    }>();
+    expectTypeOf<
+      Extract<keyof PushRequest, "force" | "remote" | "refspec" | "delete">
+    >().toBeNever();
+    expectTypeOf<Parameters<typeof pushCommandLine>>().toEqualTypeOf<
+      [branch: string]
+    >();
+  });
+
+  test("the scope of a shell lease is not a parameter", () => {
+    type Arguments = Parameters<typeof withShellLease>;
+    expectTypeOf<Arguments["length"]>().toEqualTypeOf<3>();
+    expectTypeOf<Arguments[1]>().toEqualTypeOf<LeaseDependencies>();
+    expectTypeOf<Extract<Arguments[number], TokenScope>>().toBeNever();
+    expectTypeOf<
+      Extract<keyof LeaseDependencies, "scope" | "permissions">
+    >().toBeNever();
+    // The sandbox it needs cannot run a command: only the caller's shell does.
+    expectTypeOf<Arguments[0]>().toEqualTypeOf<
+      Pick<LeaseSandbox, "name" | "setNetworkPolicy">
+    >();
+  });
+
+  test("a shell lease hands the command a placeholder and a redactor, never a token", () => {
+    expectTypeOf<ShellLease>().toEqualTypeOf<{
+      readonly placeholder: string;
+      readonly redact: (text: string) => string;
+    }>();
+    expectTypeOf<keyof ShellLease>().toEqualTypeOf<"placeholder" | "redact">();
+    expectTypeOf<
+      Parameters<Parameters<typeof withShellLease>[2]>
+    >().toEqualTypeOf<[lease: ShellLease]>();
+  });
+
+  test("runGitPush takes a sandbox and a branch name: its scope is not a parameter either", () => {
+    expectTypeOf<Parameters<typeof runGitPush>>().toEqualTypeOf<
+      [sandbox: LeaseSandbox, branch: string, dependencies?: LeaseDependencies]
+    >();
+    expectTypeOf<
+      Extract<Parameters<typeof runGitPush>[number], TokenScope>
+    >().toBeNever();
+    expectTypeOf<ReturnType<typeof runGitPush>>().toEqualTypeOf<
+      Promise<CliResult>
+    >();
+  });
+
+  test("the tool is built for a role, and its seams are optional", () => {
+    type Options = Parameters<typeof bashTool>[0];
+    expectTypeOf<Options["role"]>().toEqualTypeOf<ShellRole>();
+    expectTypeOf<OptionalKeys<Options>>().toEqualTypeOf<"lease" | "shell">();
+    expectTypeOf<Exclude<keyof Options, OptionalKeys<Options>>>().toEqualTypeOf<
+      "environment" | "role"
+    >();
+    expectTypeOf<Options["lease"]>().toEqualTypeOf<
+      LeaseDependencies | undefined
+    >();
+    expectTypeOf<
+      Awaited<ReturnType<NonNullable<Options["shell"]>>>
+    >().toEqualTypeOf<BashToolOutput>();
+    expectTypeOf<
+      Parameters<NonNullable<Options["shell"]>>[0]
+    >().toEqualTypeOf<BashToolInput>();
+  });
+
+  test("leaseExports takes a placeholder and a role and returns one line of shell", () => {
+    expectTypeOf<Parameters<typeof leaseExports>>().toEqualTypeOf<
+      [placeholder: string, role: ShellRole]
+    >();
+    expectTypeOf<ReturnType<typeof leaseExports>>().toEqualTypeOf<string>();
   });
 });
 

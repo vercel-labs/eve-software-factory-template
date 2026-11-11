@@ -7,12 +7,13 @@ import { MODELS } from "../../lib/models.js";
  * @remarks
  * Executes the analyst's plan in its own checkout of the factory repository,
  * verifies the work with the repository's own checks, commits on a feature
- * branch, and pushes it with its `git` tool (`agent/lib/github/tools.ts`).
- * The push is the station's only side effect, and it is bounded in code:
- * only branches under the factory's own prefix (`FACTORY_BRANCH_PREFIX`),
- * never main or master, no force and no deletes; the credential is leased
- * for that one command at the sandbox firewall and scoped to repository
- * contents. A pushed branch can still start whatever the repository runs on
+ * branch, and pushes it with `git push` in its shell. The station's `bash`
+ * tool takes that one command out of the shell, parses it, and runs the
+ * push itself (`agent/lib/github/tools.ts`). The push is the station's only
+ * side effect, and it is bounded in code: only branches under the factory's
+ * own prefix (`FACTORY_BRANCH_PREFIX`), never main or master, no force and
+ * no deletes; the credential is leased for that one command at the sandbox
+ * firewall and scoped to repository contents. A pushed branch can still start whatever the repository runs on
  * a push, so the default branch needs branch protection all the same. The
  * pull request is opened later by the orchestrator, after review.
  *

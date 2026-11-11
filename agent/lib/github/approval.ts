@@ -8,6 +8,14 @@ import {
   isTrusted,
 } from "../trust.js";
 import { type GhEffect, parseGh } from "./cli.js";
+import { isRepoDirectory, parseGitPush } from "./git-cli.js";
+import { REPO_DIR } from "./git-remote.js";
+import {
+  analyzeCommand,
+  inlineBodyFiles,
+  type ShellAnalysis,
+} from "./shell.js";
+import type { ShellRole } from "./shims.js";
 
 /**
  * The factory's authorization policy: what each class of caller may do on
@@ -176,47 +184,107 @@ export function ghEffectDecision(effect: GhEffect, auth: Auth): ApprovalStatus {
   }
 }
 
-interface GhToolInput {
-  readonly args?: readonly string[];
-}
+const STATION_READS_ONLY =
+  "Stations read GitHub and leave the writing to the orchestrator. Report what should change in your structured output.";
 
-/**
- * Approval policy for the orchestrator's `gh` tool.
- *
- * @remarks
- * An argv the allowlist refuses is denied here, with the reason, so the
- * model learns what would work without the command ever reaching a sandbox.
- */
-export function ghPolicy(ctx: ApprovalContext<GhToolInput>): ApprovalStatus {
-  const parsed = parseGh(ctx.toolInput?.args ?? []);
+const isDenied = (status: ApprovalStatus): boolean =>
+  typeof status === "object" && status.type === "denied";
+
+/** The outcome that stops the most: denied, then waiting, then running. */
+const strictest = (statuses: readonly ApprovalStatus[]): ApprovalStatus =>
+  statuses.find(isDenied) ??
+  statuses.find((status) => status === "user-approval") ??
+  "not-applicable";
+
+const ghStepDecision = (
+  argv: readonly string[],
+  role: ShellRole,
+  auth: Auth
+): ApprovalStatus => {
+  const inlined = inlineBodyFiles(argv);
+  if ("reason" in inlined) {
+    return denied(inlined.reason);
+  }
+  const parsed = parseGh(inlined.argv);
   if (!parsed.ok) {
     return denied(parsed.reason);
   }
-  return ghEffectDecision(parsed.invocation.effect, ctx.session.auth.current);
-}
+  const { effect } = parsed.invocation;
+  if (role === "orchestrator") {
+    return ghEffectDecision(effect, auth);
+  }
+  return effect.kind === "read" ? "not-applicable" : denied(STATION_READS_ONLY);
+};
+
+const pushDecision = (
+  analysis: Extract<ShellAnalysis, { kind: "push" }>,
+  role: ShellRole
+): ApprovalStatus => {
+  if (role !== "implementer") {
+    return denied(
+      role === "orchestrator"
+        ? "The orchestrator never pushes. The implementer delivers the branch; open the pull request from it."
+        : "This station reads the repository and never pushes. Report what should change in your structured output."
+    );
+  }
+  if (!isRepoDirectory(analysis.directory)) {
+    return denied(
+      `A push runs in the ${REPO_DIR} checkout. Write it as: git push origin <branch>.`
+    );
+  }
+  const parsed = parseGitPush(analysis.args);
+  return parsed.ok ? "not-applicable" : denied(parsed.reason);
+};
 
 /**
- * Approval policy for a station's `gh` tool: reads run, everything else is
- * denied.
+ * Maps a `bash` command, read by `analyzeCommand`, to an approval outcome.
  *
  * @remarks
- * Stations never return `user-approval`. An unattended run has nobody to
- * answer, and the orchestrator owns every write to GitHub anyway; a station
- * that wants something changed reports it in its structured output.
+ * - A command that talks to GitHub in no way the runtime can read in full
+ *   (`plain`, `shell`) always runs: it gets no credential, or one that only
+ *   reads, so there is nothing to approve.
+ * - A list of `gh` commands is held to the allowlist and to the caller's
+ *   trust class, one command at a time, and the strictest outcome decides
+ *   for the list. On a station only reads run.
+ * - A push runs for the implementer alone, and only in the form the push
+ *   parser accepts.
+ *
+ * Stations never get `user-approval` back: an unattended run has nobody to
+ * answer, and the orchestrator owns every write to GitHub anyway.
  */
-export function readOnlyGhPolicy(
-  ctx: ApprovalContext<GhToolInput>
+export function shellDecision(
+  analysis: ShellAnalysis,
+  role: ShellRole,
+  auth: Auth
 ): ApprovalStatus {
-  const parsed = parseGh(ctx.toolInput?.args ?? []);
-  if (!parsed.ok) {
-    return denied(parsed.reason);
-  }
-  return parsed.invocation.effect.kind === "read"
-    ? "not-applicable"
-    : denied(
-        "Stations read GitHub and leave the writing to the orchestrator. Report what should change in your structured output."
+  switch (analysis.kind) {
+    case "plain":
+    case "shell":
+      return "not-applicable";
+    case "gh":
+      return strictest(
+        analysis.steps.map((step) => ghStepDecision(step.argv, role, auth))
       );
+    case "push":
+      return pushDecision(analysis, role);
+    default:
+      return analysis satisfies never;
+  }
 }
+
+interface BashToolInput {
+  readonly command?: string;
+}
+
+/** Approval policy for an agent's `bash` tool. */
+export const bashPolicy =
+  (role: ShellRole) =>
+  (ctx: ApprovalContext<BashToolInput>): ApprovalStatus =>
+    shellDecision(
+      analyzeCommand(ctx.toolInput?.command ?? ""),
+      role,
+      ctx.session.auth.current
+    );
 
 /**
  * Policy for writing the factory brain (the shared memory slot).

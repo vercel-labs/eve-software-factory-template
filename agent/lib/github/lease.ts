@@ -7,9 +7,10 @@ import {
   GH_ENVIRONMENT,
   type GhInvocation,
   ghCommandLine,
+  RUNNER_PATH,
 } from "./cli.js";
 import { GITHUB_CONNECTOR, githubCredentials } from "./credentials.js";
-import type { GitInvocation } from "./git-cli.js";
+import { pushCommandLine } from "./git-cli.js";
 import { mintInstallationToken } from "./git-remote.js";
 
 /**
@@ -27,11 +28,17 @@ import { mintInstallationToken } from "./git-remote.js";
  * The token itself is minted per lease and scoped twice: to the factory
  * repository alone, and to the permissions that class of command needs
  * ({@link TOKEN_SCOPES}). A scope never widens on its own: see
- * {@link mintScopedToken}. The scope is the backstop behind the argv
- * allowlist in `cli.ts`: a station can run arbitrary code in its sandbox, so
- * whatever it might do with a lease is bounded by what the leased token can
- * do. No scope outside `repo-push` can write repository contents, which is
- * what merging and pushing both need.
+ * {@link mintScopedToken}. The scope is the backstop behind the allowlist
+ * in `cli.ts`: every agent has a shell in its sandbox, so whatever a
+ * process there might do with a lease is bounded by what the leased token
+ * can do. No scope outside `repo-push` can write repository contents, which
+ * is what merging and pushing both need.
+ *
+ * Who gets which scope follows from who wrote the command. A command an
+ * agent wrote runs in its shell under `repo-read` and nothing wider
+ * ({@link withShellLease}). The scopes that write are leased only to
+ * commands the runtime parsed and runs itself, by absolute path
+ * ({@link runGh}, {@link runGitPush}).
  */
 
 /** What a leased token is for. */
@@ -48,10 +55,12 @@ const CI_READS = ["actions:read", "checks:read", "statuses:read"] as const;
 /**
  * GitHub App permissions per scope, in `<permission>:<level>` form.
  *
- * - `repo-read`: stations reading issues, pull requests, and CI.
- * - `repo-triage`: the orchestrator's `gh`: issues and pull requests, with
- *   repository contents read-only, so this token cannot merge or push.
- * - `repo-push`: a station pushing its feature branch. It cannot change
+ * - `repo-read`: every command an agent runs in its shell, the runtime's
+ *   own `gh` reads, and the clone: issues, pull requests, CI, and contents.
+ * - `repo-triage`: the orchestrator's `gh` commands that change GitHub:
+ *   issues and pull requests, with repository contents read-only, so this
+ *   token cannot merge or push.
+ * - `repo-push`: the implementer pushing its feature branch. It cannot change
  *   workflow files unless {@link WORKFLOW_CHANGES_ENV} is set: a pushed
  *   workflow runs with the repository's secrets, so that permission is
  *   something a deployer turns on, not something a branch push comes with.
@@ -188,6 +197,29 @@ export interface MintDependencies {
   readonly now?: () => number;
 }
 
+export interface MintOptions {
+  /**
+   * Never accept a token wider than the scope, whatever
+   * `FACTORY_TOKEN_FALLBACK` says. For a credential that a shell command
+   * will hold: there the scope is the only limit there is.
+   */
+  readonly strict?: boolean;
+}
+
+const isWide = (rung: Rung): boolean =>
+  rung === null || rung === "installation";
+
+/** No token could be minted within a scope's own permissions. */
+export class NarrowTokenError extends Error {
+  constructor(scope: TokenScope, required: readonly string[], cause?: unknown) {
+    super(
+      `Could not mint a GitHub token for scope "${scope}" with permissions [${required.join(", ")}]. Check that the GitHub connector's app is installed on the factory repository and holds those permissions. If the installation cannot issue narrowed tokens at all, ${TOKEN_FALLBACK_ENV}=repository allows a wider one.`,
+      { cause }
+    );
+    this.name = "NarrowTokenError";
+  }
+}
+
 /**
  * Mints a token for `scope`.
  *
@@ -216,8 +248,10 @@ export interface MintDependencies {
  */
 export const mintScopedToken = async (
   scope: TokenScope,
-  dependencies: MintDependencies = {}
+  dependencies: MintDependencies = {},
+  options: MintOptions = {}
 ): Promise<string> => {
+  const strict = options.strict === true;
   const mint = dependencies.mint ?? connectMinter;
   const now = dependencies.now ?? Date.now;
   // An injected minter is a test's whole world: it gets no real fallback
@@ -239,6 +273,15 @@ export const mintScopedToken = async (
   };
 
   const remembered = resolvedScopes.get(scope);
+  if (
+    strict &&
+    remembered &&
+    remembered.expiresAt > now() &&
+    isWide(remembered.permissions)
+  ) {
+    // Narrowing was refused moments ago; asking again would only fail twice more.
+    throw new NarrowTokenError(scope, required);
+  }
   if (remembered && remembered.expiresAt > now()) {
     try {
       return await request(remembered.permissions);
@@ -249,7 +292,7 @@ export const mintScopedToken = async (
     }
   }
 
-  const fallback = tokenFallback();
+  const fallback = strict ? "none" : tokenFallback();
   const ladder: Rung[] = [
     [...required, ...optional],
     ...(optional.length > 0 ? [required] : []),
@@ -274,10 +317,7 @@ export const mintScopedToken = async (
       lastError = error;
     }
   }
-  throw new Error(
-    `Could not mint a GitHub token for scope "${scope}" with permissions [${required.join(", ")}]. Check that the GitHub connector's app is installed on the factory repository and holds those permissions. If the installation cannot issue narrowed tokens at all, ${TOKEN_FALLBACK_ENV}=repository allows a wider one.`,
-    { cause: lastError }
-  );
+  throw new NarrowTokenError(scope, required, lastError);
 };
 
 const missingInstallationToken = (): Promise<string> =>
@@ -297,28 +337,23 @@ const basic = (secret: string): string =>
  * ordinary egress open while the lease is active.
  */
 export const leasePolicy = (
-  kind: "gh" | "git",
+  kind: "gh" | "git" | "shell",
   token: string,
   placeholder: string
 ): SandboxNetworkPolicy => {
-  if (kind === "gh") {
-    const api: SandboxNetworkRule[] = [
-      {
-        match: {
-          headers: [
-            {
-              key: { exact: "authorization" },
-              value: { regex: `^(?:token|Bearer) ${placeholder}$` },
-            },
-          ],
-        },
-        transform: [{ headers: { authorization: `Bearer ${token}` } }],
+  const api: SandboxNetworkRule[] = [
+    {
+      match: {
+        headers: [
+          {
+            key: { exact: "authorization" },
+            value: { regex: `^(?:token|Bearer) ${placeholder}$` },
+          },
+        ],
       },
-    ];
-    return {
-      allow: { "*": [], "api.github.com": api, "uploads.github.com": api },
-    };
-  }
+      transform: [{ headers: { authorization: `Bearer ${token}` } }],
+    },
+  ];
   const git: SandboxNetworkRule[] = [
     {
       match: {
@@ -332,8 +367,18 @@ export const leasePolicy = (
       transform: [{ headers: { authorization: basic(token) } }],
     },
   ];
+  // A shell command may run either program, so its lease covers both sets
+  // of hosts; a command the runtime runs itself covers only its own.
   return {
-    allow: { "*": [], "codeload.github.com": git, "github.com": git },
+    allow: {
+      "*": [],
+      ...(kind === "git"
+        ? {}
+        : { "api.github.com": api, "uploads.github.com": api }),
+      ...(kind === "gh"
+        ? {}
+        : { "codeload.github.com": git, "github.com": git }),
+    },
   };
 };
 
@@ -480,6 +525,53 @@ const withLease = (
     }
   });
 
+/** What a shell command run under a lease is given. */
+export interface ShellLease {
+  /** Stands in for the credential inside the sandbox. */
+  readonly placeholder: string;
+  /** Removes the real credential from text, should it ever appear there. */
+  readonly redact: (text: string) => string;
+}
+
+/**
+ * Holds a read-only credential lease open while a shell command runs.
+ *
+ * @remarks
+ * This is the lease for a `bash` command that names `gh` or `git`. The
+ * command is whatever the model wrote, so the scope is fixed at `repo-read`
+ * and is not a parameter: nothing run through here can change GitHub. The
+ * credentials that write are leased only by {@link runGh} and
+ * {@link runGitPush}, to commands the runtime parsed itself.
+ *
+ * @param run - Runs the command. It gets the placeholder to export into the
+ * command's environment, where the sandbox's `gh` and `git` wrappers pick it
+ * up.
+ */
+export const withShellLease = <T>(
+  sandbox: Pick<LeaseSandbox, "name" | "setNetworkPolicy">,
+  dependencies: LeaseDependencies,
+  run: (lease: ShellLease) => Promise<T>
+): Promise<T> =>
+  serialized(sandbox.name, async () => {
+    const placeholder = `factory-${(dependencies.id ?? randomUUID)()}`;
+    // Strict: a shell command holds this credential, so it is never widened.
+    const token = await mintScopedToken("repo-read", dependencies, {
+      strict: true,
+    });
+    await sandbox.setNetworkPolicy(leasePolicy("shell", token, placeholder));
+    try {
+      return await run({
+        placeholder,
+        redact: (text) =>
+          text
+            .replaceAll(basic(token), "[redacted]")
+            .replaceAll(token, "[redacted]"),
+      });
+    } finally {
+      await sandbox.setNetworkPolicy("allow-all");
+    }
+  });
+
 /**
  * Runs a validated `gh` invocation in the sandbox under a lease.
  *
@@ -541,7 +633,7 @@ const gitEnvironment = (placeholder: string): Record<string, string> => {
   const env: Record<string, string> = {
     GIT_CONFIG_COUNT: String(config.length),
     GIT_TERMINAL_PROMPT: "0",
-    PATH: "/usr/local/bin:/usr/bin:/bin",
+    PATH: RUNNER_PATH,
   };
   config.forEach(([key, value], index) => {
     env[`GIT_CONFIG_KEY_${index}`] = key;
@@ -550,23 +642,46 @@ const gitEnvironment = (placeholder: string): Record<string, string> => {
   return env;
 };
 
-/** Runs a validated networked git invocation in the sandbox under a lease. */
-export const runGitNetwork = (
+/**
+ * Pushes one branch to the factory repository under a `repo-push` lease.
+ *
+ * @param branch - A branch name that passed `validateBranch`. Callers get it
+ * from `parseGitPush`, or resolve and validate the checked-out branch
+ * themselves; nothing unvalidated may reach this function.
+ */
+export const runGitPush = (
   sandbox: LeaseSandbox,
-  invocation: GitInvocation,
+  branch: string,
   dependencies: LeaseDependencies = {}
 ): Promise<CliResult> =>
-  withLease(
-    sandbox,
-    "git",
-    invocation.mutatesRemote ? "repo-push" : "repo-read",
-    dependencies,
-    (placeholder) => ({
-      command: invocation.commandLine,
-      env: gitEnvironment(placeholder),
-      timeoutMs: GIT_TIMEOUT_MS,
-    })
-  );
+  withLease(sandbox, "git", "repo-push", dependencies, (placeholder) => ({
+    command: pushCommandLine(branch),
+    env: gitEnvironment(placeholder),
+    timeoutMs: GIT_TIMEOUT_MS,
+  }));
+
+/**
+ * Runs a fetch the runtime rendered itself (`parseGitFetch`) under a
+ * `repo-read` lease.
+ *
+ * @remarks
+ * Only for a deployment that cannot issue a read-only token, where a fetch
+ * can't run in the agent's shell. Unlike the shell's lease, this one follows
+ * `FACTORY_TOKEN_FALLBACK`, which is safe because the command is the
+ * runtime's own: fixed remote, plain branch names, hooks off.
+ *
+ * @param commandLine - The `commandLine` of a successful `parseGitFetch`.
+ */
+export const runGitFetch = (
+  sandbox: LeaseSandbox,
+  commandLine: string,
+  dependencies: LeaseDependencies = {}
+): Promise<CliResult> =>
+  withLease(sandbox, "git", "repo-read", dependencies, (placeholder) => ({
+    command: commandLine,
+    env: gitEnvironment(placeholder),
+    timeoutMs: GIT_TIMEOUT_MS,
+  }));
 
 /**
  * Runs a git command line the factory wrote itself (not one a model

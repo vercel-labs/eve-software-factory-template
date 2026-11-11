@@ -7,224 +7,203 @@ import {
 } from "./git-remote.js";
 
 /**
- * The networked `git` subcommands a station may run with the factory's
- * credential.
+ * `git push`, the one git command that needs a credential able to write.
  *
  * @remarks
- * Everything local (status, diff, branch, commit, checkout, log) is plain
- * `git` in the station's shell and needs no credential. Only the four
- * commands that talk to GitHub come through here, because they are the ones
- * that run while the installation token is attached at the sandbox firewall.
+ * Agents run git in their shell, through the sandbox's `git` wrapper. Every
+ * command that only reads from GitHub (`fetch`, `pull`, `ls-remote`,
+ * `clone`) runs there as written, under a read-only credential. A push is
+ * different: it is the only command that gets the `repo-push` token, so the
+ * `bash` tool takes it out of the shell, parses it here, and runs a command
+ * the factory wrote itself, by absolute path and against the literal
+ * repository URL.
+ *
+ * `git fetch` is parsed here too, for one case only: a deployment whose
+ * GitHub App cannot issue a read-only token (see `FACTORY_TOKEN_FALLBACK`).
+ * A shell command is never given a wider token than that, so there a fetch
+ * can't run in the shell, and the runtime runs it the same way it runs a
+ * push.
  */
-export const GIT_NETWORK_SUBCOMMANDS = [
-  "fetch",
-  "ls-remote",
-  "pull",
-  "push",
-] as const;
-
-export type GitNetworkSubcommand = (typeof GIT_NETWORK_SUBCOMMANDS)[number];
-
-/** A validated networked git invocation, ready to hand to the sandbox. */
-export interface GitInvocation {
-  /** Branches named by the invocation, already validated. */
-  readonly branches: readonly string[];
-  /** The full shell command, with the literal remote URL in place. */
-  readonly commandLine: string;
-  /** Whether the command changes the remote (only `push` does). */
-  readonly mutatesRemote: boolean;
-  readonly subcommand: GitNetworkSubcommand;
-}
-
-export type GitParseResult =
-  | { readonly invocation: GitInvocation; readonly ok: true }
-  | { readonly ok: false; readonly reason: string };
-
-export const MAX_GIT_ARGS = 16;
 
 /** The image's own git, by absolute path, so nothing earlier on PATH can stand in for it. */
 export const GIT_BINARY = "/usr/bin/git";
 
-/** The one remote name the tool accepts; it always means the factory repository. */
+/** The one remote name a push accepts; it always means the factory repository. */
 const REMOTE_ALIAS = "origin";
 
-const DEPTH_PATTERN = /^[1-9]\d{0,5}$/;
+/** Flags accepted for familiarity. They change nothing on the remote. */
+const TOLERATED_FLAGS = new Set(["-u", "--set-upstream"]);
 
-interface SubcommandSpec {
-  readonly bool: readonly string[];
-  /** Flags accepted for familiarity but not forwarded. */
-  readonly dropped?: readonly string[];
-  readonly maxRefs: number;
-  readonly minRefs: number;
-  readonly value?: Readonly<Record<string, RegExp>>;
+export const MAX_PUSH_ARGS = 8;
+
+export interface PushRequest {
+  /**
+   * The branch to push, already validated, or null for the branch that is
+   * checked out (`git push`, `git push origin HEAD`), which the caller
+   * resolves in the sandbox and validates before pushing.
+   */
+  readonly branch: string | null;
 }
 
-const SPECS: Readonly<Record<GitNetworkSubcommand, SubcommandSpec>> = {
-  fetch: {
-    bool: ["--prune", "--tags", "--no-tags", "--unshallow"],
-    maxRefs: 8,
-    minRefs: 0,
-    value: { "--depth": DEPTH_PATTERN },
-  },
-  "ls-remote": { bool: ["--heads", "--tags"], maxRefs: 8, minRefs: 0 },
-  pull: {
-    bool: ["--ff-only", "--rebase", "--no-rebase"],
-    maxRefs: 1,
-    minRefs: 1,
-  },
-  push: {
-    bool: [],
-    dropped: ["-u", "--set-upstream"],
-    maxRefs: 1,
-    minRefs: 1,
-  },
-};
+export type PushParseResult =
+  | { readonly ok: true; readonly push: PushRequest }
+  | { readonly ok: false; readonly reason: string };
 
-const isSubcommand = (value: string): value is GitNetworkSubcommand =>
-  (GIT_NETWORK_SUBCOMMANDS as readonly string[]).includes(value);
+const refuse = (reason: string): PushParseResult => ({ ok: false, reason });
 
-interface Split {
-  readonly flags: readonly string[];
-  readonly refs: readonly string[];
-}
-
-const splitArgs = (
-  subcommand: GitNetworkSubcommand,
-  rest: readonly string[]
-): Split | string => {
-  const spec = SPECS[subcommand];
-  const flags: string[] = [];
+/**
+ * Parses the words after `git push`.
+ *
+ * @remarks
+ * - The remote is never taken from the caller: `origin` is accepted as a
+ *   word and the push goes to the literal repository URL, because a
+ *   sandbox's remote configuration is writable by the model.
+ * - The ref is a plain branch name or `HEAD`. A refspec with a colon, a
+ *   leading `+`, or a `refs/` prefix is refused, so a push can only update
+ *   the branch it names.
+ * - No other flag is accepted: no force, delete, mirror, all, or tags.
+ */
+export const parseGitPush = (args: readonly string[]): PushParseResult => {
+  if (args.length > MAX_PUSH_ARGS) {
+    return refuse(`Too many arguments (limit ${MAX_PUSH_ARGS}).`);
+  }
   const refs: string[] = [];
-  for (let index = 0; index < rest.length; index += 1) {
-    const arg = rest[index] ?? "";
-    if (!arg.startsWith("-")) {
-      refs.push(arg);
+  for (const arg of args) {
+    if (TOLERATED_FLAGS.has(arg)) {
       continue;
     }
-    if (spec.dropped?.includes(arg)) {
-      continue;
+    if (arg.startsWith("-")) {
+      return refuse(
+        `git push does not accept ${arg} here. Write it as: git push origin <branch>.`
+      );
     }
-    if (spec.bool.includes(arg)) {
-      flags.push(arg);
-      continue;
-    }
-    const pattern = spec.value?.[arg];
-    const value = rest[index + 1];
-    if (pattern && value !== undefined && pattern.test(value)) {
-      flags.push(arg, value);
-      index += 1;
-      continue;
-    }
-    const allowed = [
-      ...spec.bool,
-      ...Object.keys(spec.value ?? {}),
-      ...(spec.dropped ?? []),
-    ];
-    return `git ${subcommand} does not accept ${arg} here. Allowed flags: ${
-      allowed.length === 0 ? "none" : allowed.join(", ")
-    }.`;
+    refs.push(arg);
   }
-  // The only remote is the factory repository; the name is a courtesy.
-  const named = refs[0] === REMOTE_ALIAS ? refs.slice(1) : refs;
-  if (named.length < spec.minRefs) {
-    return `git ${subcommand} needs a branch name, like: ${subcommand} origin factory/bug-fix-login.`;
+  // git reads the first word after the flags as the remote. The only remote
+  // is the factory repository, so any other word there is a mistake.
+  if (refs.length > 0 && refs[0] !== REMOTE_ALIAS) {
+    return refuse(
+      "The only remote is origin, the factory repository. Write it as: git push origin <branch>."
+    );
   }
-  if (named.length > spec.maxRefs) {
-    return `git ${subcommand} takes at most ${spec.maxRefs} branch name(s).`;
+  const named = refs.slice(1);
+  if (named.length > 1) {
+    return refuse("git push takes one branch. Push branches one at a time.");
   }
-  return { flags, refs: named };
+  const [ref] = named;
+  if (ref === undefined || ref === "HEAD") {
+    return { ok: true, push: { branch: null } };
+  }
+  const refusal = validateBranch(ref);
+  return refusal ? refuse(refusal) : { ok: true, push: { branch: ref } };
 };
 
 const git = (...parts: readonly string[]): string =>
   [GIT_BINARY, "-C", shellQuote(REPO_DIR), ...parts].join(" ");
 
-const render = (
-  subcommand: GitNetworkSubcommand,
-  { flags, refs }: Split
-): string => {
-  const flagText = flags.map(shellQuote);
-  const url = shellQuote(REMOTE_URL);
-  switch (subcommand) {
-    case "fetch": {
-      const specs =
-        refs.length === 0
-          ? ["+refs/heads/*:refs/remotes/origin/*"]
-          : refs.map((ref) => `+refs/heads/${ref}:refs/remotes/origin/${ref}`);
-      return git("fetch", ...flagText, url, ...specs.map(shellQuote));
-    }
-    case "ls-remote":
-      return git("ls-remote", ...flagText, url, ...refs.map(shellQuote));
-    case "pull":
-      return git(
-        "pull",
-        ...flagText,
-        url,
-        ...refs.map((ref) => shellQuote(`refs/heads/${ref}`))
-      );
-    case "push": {
-      const [branch = ""] = refs;
-      const ref = `refs/heads/${branch}`;
-      // Keep origin/<branch> in step so `git status` tells the truth afterwards.
-      return `${git("push", url, shellQuote(`${ref}:${ref}`))} && ${git(
-        "update-ref",
-        shellQuote(`refs/remotes/origin/${branch}`),
-        shellQuote(ref)
-      )}`;
-    }
-    default:
-      return subcommand satisfies never;
-  }
-};
+/** Prints the name of the branch checked out in the station's clone. */
+export const CURRENT_BRANCH_COMMAND = git("symbolic-ref", "--short", "HEAD");
 
 /**
- * Parses a networked git argv into a command that can only reach the factory
- * repository.
+ * The command that pushes one branch to the factory repository.
+ *
+ * @param branch - A branch name that passed `validateBranch`.
+ */
+export const pushCommandLine = (branch: string): string => {
+  const ref = `refs/heads/${branch}`;
+  // Keep origin/<branch> in step so `git status` tells the truth afterwards.
+  return `${git("push", shellQuote(REMOTE_URL), shellQuote(`${ref}:${ref}`))} && ${git(
+    "update-ref",
+    shellQuote(`refs/remotes/origin/${branch}`),
+    shellQuote(ref)
+  )}`;
+};
+
+const DEPTH_PATTERN = /^[1-9]\d{0,5}$/;
+const FETCH_FLAGS = new Set(["--prune", "--no-tags", "--unshallow"]);
+export const MAX_FETCH_ARGS = 12;
+
+export type FetchParseResult =
+  | { readonly commandLine: string; readonly ok: true }
+  | { readonly ok: false; readonly reason: string };
+
+const refuseFetch = (reason: string): FetchParseResult => ({
+  ok: false,
+  reason,
+});
+
+/**
+ * Parses the words after `git fetch` into a command the runtime can run.
  *
  * @remarks
- * - The remote is never taken from the caller: `origin` is accepted as a
- *   word and replaced with the literal repository URL, because a sandbox's
- *   remote configuration is writable by the model.
- * - Refs are plain branch names. A refspec with a colon, a leading `+`, or a
- *   `refs/` prefix is refused, so a push can only update the branch it names,
- *   and `push` additionally refuses the protected branches.
- * - Force flags, `--delete`, `--mirror`, `--all`, and `--tags` on push are
- *   not in the allowlist.
- *
- * @param argv - The arguments after `git` (a leading `git` is tolerated).
+ * `origin` and plain branch names only, as for a push; with no branch the
+ * fetch covers every branch. Each branch lands on `origin/<branch>`, so a
+ * plain `git checkout <branch>` works afterwards.
  */
-export const parseGitNetwork = (argv: readonly string[]): GitParseResult => {
-  const args = argv[0] === "git" ? argv.slice(1) : argv;
-  const [subcommand = "", ...rest] = args;
-  if (!isSubcommand(subcommand)) {
-    return {
-      ok: false,
-      reason: `This tool runs only the git commands that talk to GitHub: ${GIT_NETWORK_SUBCOMMANDS.join(", ")}. Run everything else (status, diff, checkout, commit, log) as plain git in the shell.`,
-    };
+export const parseGitFetch = (args: readonly string[]): FetchParseResult => {
+  if (args.length > MAX_FETCH_ARGS) {
+    return refuseFetch(`Too many arguments (limit ${MAX_FETCH_ARGS}).`);
   }
-  if (args.length > MAX_GIT_ARGS) {
-    return {
-      ok: false,
-      reason: `Too many arguments (limit ${MAX_GIT_ARGS}).`,
-    };
-  }
-  const split = splitArgs(subcommand, rest);
-  if (typeof split === "string") {
-    return { ok: false, reason: split };
-  }
-  for (const ref of split.refs) {
-    const refusal =
-      subcommand === "push" ? validateBranch(ref) : validateRef(ref);
-    if (refusal) {
-      return { ok: false, reason: refusal };
+  const flags: string[] = [];
+  const refs: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (FETCH_FLAGS.has(arg)) {
+      flags.push(arg);
+    } else if (arg === "--depth" && DEPTH_PATTERN.test(args[index + 1] ?? "")) {
+      flags.push(arg, args[index + 1] ?? "");
+      index += 1;
+    } else if (arg.startsWith("-")) {
+      return refuseFetch(
+        `git fetch does not accept ${arg} here. Write it as: git fetch origin <branch>.`
+      );
+    } else {
+      refs.push(arg);
     }
   }
+  if (refs.length > 0 && refs[0] !== REMOTE_ALIAS) {
+    return refuseFetch(
+      "The only remote is origin, the factory repository. Write it as: git fetch origin <branch>."
+    );
+  }
+  const branches = refs.slice(1);
+  for (const branch of branches) {
+    const refusal = validateRef(branch);
+    if (refusal) {
+      return refuseFetch(refusal);
+    }
+  }
+  const specs =
+    branches.length === 0
+      ? ["+refs/heads/*:refs/remotes/origin/*"]
+      : branches.map(
+          (branch) => `+refs/heads/${branch}:refs/remotes/origin/${branch}`
+        );
   return {
-    invocation: {
-      branches: split.refs,
-      commandLine: render(subcommand, split),
-      mutatesRemote: subcommand === "push",
-      subcommand,
-    },
+    commandLine: git(
+      "fetch",
+      ...flags.map(shellQuote),
+      shellQuote(REMOTE_URL),
+      ...specs.map(shellQuote)
+    ),
     ok: true,
   };
+};
+
+const TRAILING_SLASHES = /\/+$/;
+const LEADING_DOT_SLASH = /^\.\//;
+
+/**
+ * Whether a directory named with `cd` or `git -C` is the station's clone.
+ * A push always runs there, so naming any other directory is refused.
+ */
+export const isRepoDirectory = (directory: string | null): boolean => {
+  if (directory === null) {
+    return true;
+  }
+  const trimmed = directory.replace(TRAILING_SLASHES, "");
+  return (
+    trimmed === REPO_DIR ||
+    trimmed.replace(LEADING_DOT_SLASH, "") === REPO_DIR.split("/").at(-1)
+  );
 };

@@ -1,5 +1,6 @@
 import { githubChannel } from "eve/channels/github";
 import { resolveBotName } from "../lib/github/bot-name.js";
+import { checkoutForTurn, isCheckoutSandbox } from "../lib/github/checkout.js";
 import { githubCredentials } from "../lib/github/credentials.js";
 import {
   onCheckSuite,
@@ -61,6 +62,12 @@ import {
  *   task bounds the loop by counting earlier fix-attempt comments on the
  *   thread. Requires the connector to subscribe to the `check_suite` webhook
  *   event.
+ * - `turn.started` is the factory's own handler, not the channel's default.
+ *   Both react to the triggering comment and check the repository out into
+ *   the root sandbox, but the default leaves the installation token attached
+ *   to every git request from that sandbox, where the orchestrator now has a
+ *   shell. The factory's checkout runs under a read-only credential lease
+ *   that ends with the command.
  * - Human-in-the-loop prompts are the channel's own (eve ≥ 0.34 posts them by
  *   default): when a session stops for approval or input, the channel renders
  *   the request as a comment with a mention-based reply instruction. Passing
@@ -72,6 +79,35 @@ import {
 export default githubChannel({
   botName: resolveBotName,
   credentials: githubCredentials,
+  events: {
+    // Replaces the built-in handler, which leaves the app's installation
+    // token attached to every git request from the orchestrator's sandbox
+    // (see `agent/lib/github/checkout.ts`). Like the built-in, a failed
+    // reaction or checkout is logged and the turn goes on without it.
+    async "turn.started"(_event, ctx) {
+      try {
+        await ctx.channel.thread.react("eyes");
+      } catch (error) {
+        console.warn("[factory] GitHub reaction failed:", error);
+      }
+      try {
+        const sandbox = await ctx.getSandbox();
+        if (!isCheckoutSandbox(sandbox)) {
+          throw new Error(
+            "The checkout needs a sandbox with a network policy (Vercel Sandbox)."
+          );
+        }
+        const { state } = ctx.channel;
+        const checkout = await checkoutForTurn(sandbox, state);
+        if (checkout) {
+          state.checkoutPath = checkout.path;
+          state.headSha = checkout.sha;
+        }
+      } catch (error) {
+        console.warn("[factory] GitHub checkout failed:", error);
+      }
+    },
+  },
   onCheckSuite,
   onComment,
   onIssue,

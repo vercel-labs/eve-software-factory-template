@@ -1,44 +1,85 @@
 import type { SandboxEnvironment } from "eve/sandbox";
 import type { VercelSandboxSession } from "eve/sandbox/vercel";
-import { defineTool, toolOutput } from "eve/tools";
-import { z } from "zod";
+import { defineTool } from "eve/tools";
+import { type BashToolInput, type BashToolOutput, bash } from "eve/tools/bash";
 import { FACTORY_BRANCH_PREFIX, FACTORY_REPO } from "../constants.js";
-import { ghPolicy, readOnlyGhPolicy } from "./approval.js";
-import { MAX_GH_ARGS, parseGh } from "./cli.js";
+import { bashPolicy } from "./approval.js";
 import {
-  GIT_NETWORK_SUBCOMMANDS,
-  MAX_GIT_ARGS,
-  parseGitNetwork,
+  type GhInvocation,
+  MAX_GH_ARG_LENGTH,
+  parseGh,
+  shellQuote,
+} from "./cli.js";
+import {
+  CURRENT_BRANCH_COMMAND,
+  isRepoDirectory,
+  parseGitFetch,
+  parseGitPush,
 } from "./git-cli.js";
-import { REPO_DIR } from "./git-remote.js";
+import { validateBranch } from "./git-remote.js";
 import {
   type CliResult,
   type LeaseDependencies,
   type LeaseSandbox,
+  NarrowTokenError,
   runGh,
-  runGitNetwork,
+  runGitFetch,
+  runGitPush,
+  withShellLease,
 } from "./lease.js";
+import {
+  analyzeCommand,
+  type GhStep,
+  inlineBodyFiles,
+  lexGitFetch,
+  type ShellAnalysis,
+} from "./shell.js";
+import {
+  LEASE_VARIABLE,
+  REPO_VARIABLE,
+  ROLE_VARIABLE,
+  type ShellRole,
+} from "./shims.js";
 
 /**
- * The factory's `gh` and `git` tools: the real binaries, run in a sandbox,
- * behind an argv allowlist and a credential lease.
+ * The factory's `bash` tool: eve's own, with GitHub access wired in.
  *
  * @remarks
- * These replace a GitHub API tool surface with the GitHub CLI itself. The
- * model writes ordinary `gh` and `git` commands; what keeps that safe is
- * layered:
+ * Agents use `git` and `gh` in the shell as they would anywhere. This wraps
+ * eve's `bash` so that works without a token ever entering the sandbox, and
+ * so that what a command may change still depends on who is asking.
  *
- * 1. The argv is parsed against an allowlist (`cli.ts`, `git-cli.ts`).
- *    Unknown commands and flags never run.
- * 2. The command's effect and the caller's trust class decide whether it
- *    runs, waits for a person, or is denied (`approval.ts`).
- * 3. The credential is leased for that one command, scoped to the factory
- *    repository and the permissions the command class needs, and never
- *    enters the sandbox (`lease.ts`).
+ * Each command is sorted by `analyzeCommand` (`shell.ts`) and run one of
+ * three ways:
  *
- * Each agent that needs a tool mounts it from its own `tools/` directory
- * with its own sandbox environment, since stations inherit nothing from the
- * orchestrator.
+ * 1. Nothing that names `gh` or a networked `git` command: eve's `bash`, as
+ *    is.
+ * 2. Anything that names them: eve's `bash`, inside a read-only credential
+ *    lease. The placeholder is exported into the command's environment,
+ *    where the sandbox's `gh` and `git` wrappers (`shims.ts`) hand it to the
+ *    real programs. Whatever the command is, it can read the factory
+ *    repository and change nothing.
+ * 3. A command that is nothing but `gh` commands and changes something, or
+ *    nothing but one `git push`: not run by a shell at all. The runtime
+ *    parses it against the allowlist, the approval policy checks the effect
+ *    against the caller (`approval.ts`), and the runtime runs the parsed
+ *    words itself, by absolute path, under a lease scoped to that kind of
+ *    write (`lease.ts`).
+ *
+ * Each agent mounts the tool from its own `tools/bash.ts` with its own
+ * sandbox environment, since stations inherit nothing from the orchestrator.
+ *
+ * What this does not do: isolate a write from the rest of the sandbox. A
+ * command of the third kind runs in the same sandbox where the agent has a
+ * shell, and while it runs, its placeholder can be read there (the process
+ * environment, a temp file name) by anything else the agent left running:
+ * a command issued alongside it, or one started in the background earlier.
+ * So the allowlist and the trust policy decide what a well-behaved run
+ * does; for a run that has been taken over by its input, the limit is what
+ * the leased token can do (`repo-triage`: issues and pull requests, never
+ * contents; `repo-push`: contents on the implementer). Queueing commands
+ * would not change that, since a background process outlives its command.
+ * Closing it needs the writes to run somewhere the agent has no shell.
  */
 
 type FactoryEnvironment = SandboxEnvironment<
@@ -46,29 +87,42 @@ type FactoryEnvironment = SandboxEnvironment<
   VercelSandboxSession
 >;
 
-const argsSchema = (max: number, example: string) =>
-  z.object({
-    args: z
-      .array(z.string())
-      .min(1)
-      .max(max)
-      .describe(
-        `The command's arguments as an array, one element per argument, without the program name. Example: ${example}. No shell is involved, so never quote or escape.`
-      ),
-  });
-
-const cliOutput = (result: CliResult) => {
-  const stdout = result.stdout.trim();
-  const stderr = result.stderr.trim();
-  if (result.exitCode === 0) {
-    return toolOutput.text(stdout || stderr || "(no output)");
-  }
-  return toolOutput.errorText(
-    [stdout, stderr && `[stderr]\n${stderr}`, `[exit ${result.exitCode}]`]
-      .filter(Boolean)
-      .join("\n")
-  );
+/** The slice of a sandbox session the tool needs beyond the lease's own. */
+type ToolSandbox = LeaseSandbox & {
+  readonly readTextFile: (options: {
+    path: string;
+  }) => PromiseLike<string | null>;
 };
+
+/** Runs a command in the sandbox's shell and returns its final result. */
+type Shell = (
+  input: BashToolInput,
+  ctx: Parameters<typeof bash.execute>[1]
+) => Promise<BashToolOutput>;
+
+/** eve's `bash`, reduced to its final result when it reports progress. */
+const eveShell: Shell = async (input, ctx) => {
+  const result = await bash.execute(input, ctx);
+  if (!(Symbol.asyncIterator in result)) {
+    return result;
+  }
+  let last: BashToolOutput | undefined;
+  for await (const update of result) {
+    last = update;
+  }
+  if (last === undefined) {
+    throw new Error("The command produced no result.");
+  }
+  return last;
+};
+
+const completed = (result: CliResult): BashToolOutput => ({
+  exitCode: result.exitCode,
+  status: "completed",
+  stderr: result.stderr,
+  stdout: result.stdout,
+  truncated: result.truncated,
+});
 
 /**
  * Refuses to close or reopen a pull request through `gh issue close` or
@@ -78,7 +132,7 @@ const cliOutput = (result: CliResult) => {
  * To GitHub a pull request is also an issue, and `gh issue close 34`
  * closes pull request #34. Closing an issue is reversible triage that runs
  * for every caller; closing a pull request is a write that an unattended
- * run is denied. The argv alone can't tell the two apart, so this asks
+ * run is denied. The command alone can't tell the two apart, so this asks
  * GitHub which one the number is before the command runs, and fails closed
  * when it can't find out.
  */
@@ -105,117 +159,257 @@ const assertIsIssue = async (
   }
   if (answer === "true") {
     throw new Error(
-      `#${thread} is a pull request, not an issue. Closing or reopening a pull request is ["pr","close","${thread}"] or ["pr","reopen","${thread}"].`
+      `#${thread} is a pull request, not an issue. Closing or reopening a pull request is gh pr close ${thread} or gh pr reopen ${thread}.`
     );
   }
 };
 
-const GH_READ_EXAMPLES =
-  '["issue","view","12","--comments"], ["pr","view","34","--json","title,body,headRefName,isDraft"], ["pr","diff","34"], ["pr","checks","34"], ["run","view","991","--log-failed"], ["label","list"]';
+/**
+ * Parses one `gh` step against the allowlist, reading any `--body-file`
+ * from the sandbox so the text becomes the invocation's body.
+ */
+const resolveStep = async (
+  sandbox: ToolSandbox,
+  step: GhStep
+): Promise<GhInvocation> => {
+  const inlined = inlineBodyFiles(step.argv);
+  if ("reason" in inlined) {
+    throw new Error(inlined.reason);
+  }
+  const argv = [...inlined.argv];
+  for (const file of inlined.files) {
+    // biome-ignore lint/performance/noAwaitInLoops: a command has one body file, rarely two
+    const text = await sandbox.readTextFile({ path: file.path });
+    if (text === null) {
+      throw new Error(`--body-file: ${file.path} does not exist.`);
+    }
+    if (text.length > MAX_GH_ARG_LENGTH) {
+      throw new Error(
+        `--body-file: ${file.path} is longer than ${MAX_GH_ARG_LENGTH} characters.`
+      );
+    }
+    argv[file.at] = text;
+  }
+  const parsed = parseGh(argv);
+  if (!parsed.ok) {
+    throw new Error(parsed.reason);
+  }
+  return parsed.invocation;
+};
+
+/** Whether every step parses and only reads; unparseable steps count as no. */
+const onlyReads = (steps: readonly GhStep[]): boolean =>
+  steps.every((step) => {
+    const inlined = inlineBodyFiles(step.argv);
+    if ("reason" in inlined) {
+      return false;
+    }
+    const parsed = parseGh(inlined.argv);
+    return parsed.ok && parsed.invocation.effect.kind === "read";
+  });
 
 /**
- * Builds a `gh` tool.
- *
- * @param options.environment - The mounting agent's own sandbox environment.
- * @param options.mode - `"full"` on the orchestrator: writes follow the
- * trust policy. `"read-only"` on a station: reads run, writes are denied.
+ * Runs a list of `gh` commands that changes something, one validated
+ * invocation at a time, the way a shell would run the list.
  */
-export const ghTool = (options: {
-  environment: FactoryEnvironment;
-  /** Overrides for the credential lease. The test suite's seam; unset in the app. */
-  lease?: LeaseDependencies;
-  mode: "full" | "read-only";
-}) => {
-  const full = options.mode === "full";
-  return defineTool({
-    approval: full ? ghPolicy : readOnlyGhPolicy,
-    description: full
-      ? `Run the GitHub CLI (gh) against ${FACTORY_REPO}: read issues, pull requests, checks, and CI logs; comment; label; create and edit issues; open pull requests. The repository is fixed, so leave out --repo. Only non-interactive flags work; pass text with --body. Examples: ${GH_READ_EXAMPLES}, ["issue","comment","12","--body","Classification is complete."], ["issue","edit","12","--add-label","bug"], ["pr","create","--draft","--head","factory/bug-fix-login","--base","main","--title","Fix login 500","--body","..."]. Merging is not available.`
-      : `Run read-only GitHub CLI (gh) commands against ${FACTORY_REPO}: issues, pull requests, diffs, checks, and CI logs. The repository is fixed, so leave out --repo. Examples: ${GH_READ_EXAMPLES}. Commands that change anything on GitHub are refused here.`,
-    async execute({ args }, ctx) {
-      const parsed = parseGh(args);
-      if (!parsed.ok) {
-        throw new Error(parsed.reason);
-      }
-      const { invocation } = parsed;
-      if (!full && invocation.effect.kind !== "read") {
-        throw new Error("This tool only runs read-only gh commands.");
-      }
-      const sandbox = await ctx.getSandbox(options.environment);
-      if (invocation.effect.kind === "state") {
-        await assertIsIssue(
-          sandbox,
-          invocation.effect.commentThread,
-          options.lease
-        );
-      }
-      return await runGh(
-        sandbox,
-        invocation,
-        invocation.effect.kind === "read" ? "repo-read" : "repo-triage",
-        options.lease
+const runGhSteps = async (
+  sandbox: ToolSandbox,
+  steps: readonly GhStep[],
+  role: ShellRole,
+  lease: LeaseDependencies | undefined
+): Promise<BashToolOutput> => {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  let exitCode = 0;
+  let truncated = false;
+  for (const [index, step] of steps.entries()) {
+    // As in a shell: `&&` skips its own step after a failure, and whatever
+    // follows a later `;` still runs.
+    if (index > 0 && step.after === "&&" && exitCode !== 0) {
+      continue;
+    }
+    // biome-ignore lint/performance/noAwaitInLoops: the steps run in order, each depending on the last
+    const invocation = await resolveStep(sandbox, step);
+    const { effect } = invocation;
+    if (role !== "orchestrator" && effect.kind !== "read") {
+      throw new Error("This agent only runs read-only gh commands.");
+    }
+    if (effect.kind === "state") {
+      await assertIsIssue(sandbox, effect.commentThread, lease);
+    }
+    const result = await runGh(
+      sandbox,
+      invocation,
+      effect.kind === "read" ? "repo-read" : "repo-triage",
+      lease
+    );
+    ({ exitCode } = result);
+    truncated ||= result.truncated;
+    if (result.stdout.trim()) {
+      stdout.push(result.stdout.trimEnd());
+    }
+    if (result.stderr.trim()) {
+      stderr.push(result.stderr.trimEnd());
+    }
+  }
+  return {
+    exitCode,
+    status: "completed",
+    stderr: stderr.join("\n"),
+    stdout: stdout.join("\n"),
+    truncated,
+  };
+};
+
+const runPush = async (
+  sandbox: ToolSandbox,
+  analysis: Extract<ShellAnalysis, { kind: "push" }>,
+  role: ShellRole,
+  lease: LeaseDependencies | undefined
+): Promise<BashToolOutput> => {
+  if (role !== "implementer") {
+    throw new Error("This agent never pushes.");
+  }
+  if (!isRepoDirectory(analysis.directory)) {
+    throw new Error("A push runs in the repository checkout.");
+  }
+  const parsed = parseGitPush(analysis.args);
+  if (!parsed.ok) {
+    throw new Error(parsed.reason);
+  }
+  let { branch } = parsed.push;
+  if (branch === null) {
+    const current = await sandbox.run({ command: CURRENT_BRANCH_COMMAND });
+    const name = String(current.stdout ?? "").trim();
+    if (current.exitCode !== 0 || name === "") {
+      throw new Error(
+        "Could not tell which branch is checked out. Name it: git push origin <branch>."
       );
-    },
-    inputSchema: argsSchema(MAX_GH_ARGS, '["pr","view","34"]'),
-    toModelOutput: cliOutput,
-  });
+    }
+    const refusal = validateBranch(name);
+    if (refusal) {
+      throw new Error(refusal);
+    }
+    branch = name;
+  }
+  return completed(await runGitPush(sandbox, branch, lease));
+};
+
+export const WHOLE_COMMANDS_ONLY =
+  "No read-only GitHub credential is available here, so gh and git reach GitHub only as a whole command: one or more gh commands joined with &&, or git fetch origin <branch>, with every argument written out and no pipes, variables, or redirects.";
+
+/**
+ * Runs a read without a shell, for a deployment whose GitHub App cannot
+ * issue a read-only token.
+ *
+ * @remarks
+ * A shell command is never given a token wider than read-only, whatever
+ * `FACTORY_TOKEN_FALLBACK` allows, so when that token can't be minted the
+ * command can't run in the shell. What the runtime can still do is run a
+ * read it parsed itself: a list of `gh` reads, or one `git fetch`. Those go
+ * through the validated runners, which do follow the fallback setting.
+ * Anything else is refused with the form that works.
+ */
+const runWithoutShell = async (
+  sandbox: ToolSandbox,
+  command: string,
+  analysis: ShellAnalysis,
+  role: ShellRole,
+  lease: LeaseDependencies | undefined,
+  cause: unknown
+): Promise<BashToolOutput> => {
+  if (analysis.kind === "gh") {
+    return await runGhSteps(sandbox, analysis.steps, role, lease);
+  }
+  const fetch = lexGitFetch(command);
+  if (fetch && role !== "orchestrator" && isRepoDirectory(fetch.directory)) {
+    const parsed = parseGitFetch(fetch.args);
+    if (!parsed.ok) {
+      throw new Error(parsed.reason);
+    }
+    return completed(await runGitFetch(sandbox, parsed.commandLine, lease));
+  }
+  throw new Error(WHOLE_COMMANDS_ONLY, { cause });
+};
+
+/** The line that hands a lease to the sandbox's `gh` and `git` wrappers. */
+export const leaseExports = (placeholder: string, role: ShellRole): string =>
+  `export ${LEASE_VARIABLE}=${shellQuote(placeholder)} ${REPO_VARIABLE}=${shellQuote(FACTORY_REPO)} ${ROLE_VARIABLE}=${shellQuote(role)}`;
+
+const READS = `git and gh work here as usual, against ${FACTORY_REPO} (leave out --repo). Reading works anywhere in a command, pipes included: gh issue view 12 --comments, gh pr view 34 --json title,body,headRefName,isDraft, gh pr diff 34, gh pr checks 34, gh run view 991 --log-failed, gh label list, git fetch origin <branch>.`;
+
+const GITHUB_NOTES: Readonly<Record<ShellRole, string>> = {
+  implementer: `${READS} gh is read-only here. To deliver your committed branch, make git push the whole command: git push origin <branch>. Only branches that start with ${FACTORY_BRANCH_PREFIX} can be pushed; force pushes and deleting branches are refused.`,
+  orchestrator: `${READS} A command that changes GitHub (comment, label, create, edit, close, reopen, gh pr create) has to be the whole command: only gh commands, joined with && when there are several, every argument written out, with no pipes, variables, or redirects. For text with several lines, or with a dollar sign or a backtick in it, use --body "$(cat <<'EOF' ... EOF)" or --body-file <path>. Examples: gh issue comment 12 --body "Classification is complete."; gh issue edit 12 --add-label bug; gh pr create --draft --head factory/bug-fix-login --base main --title "Fix login 500" --body-file pr-body.md. Merging and pushing are not available.`,
+  reader: `${READS} gh is read-only here and this agent never pushes.`,
 };
 
 /**
- * Builds a station's networked `git` tool.
+ * Builds an agent's `bash` tool.
  *
- * @remarks
- * Local git (status, diff, branch, checkout, commit, log) is plain `git` in
- * the station's shell. This tool is for the commands that talk to GitHub,
- * which run under a credential lease.
- *
- * @param options.environment - The station's own sandbox environment.
- * @param options.push - Whether this station may push. Only the implementer
- * does; for everyone else `push` is refused before it reaches a sandbox.
+ * @param options.environment - The mounting agent's own sandbox environment.
+ * @param options.role - `"orchestrator"`: `gh` writes follow the trust
+ * policy, no push. `"implementer"`: `gh` reads, and `git push` to the
+ * factory's own branches. `"reader"`: `gh` and `git` read only.
  */
-export const gitTool = (options: {
+export const bashTool = (options: {
   environment: FactoryEnvironment;
   /** Overrides for the credential lease. The test suite's seam; unset in the app. */
   lease?: LeaseDependencies;
-  push: boolean;
+  role: ShellRole;
+  /** Runs a command in the sandbox's shell. The test suite's seam; eve's `bash` in the app. */
+  shell?: Shell;
 }) => {
-  const allowed = GIT_NETWORK_SUBCOMMANDS.filter(
-    (subcommand) => options.push || subcommand !== "push"
-  );
-  const check = (args: readonly string[]) => {
-    const parsed = parseGitNetwork(args);
-    if (!parsed.ok) {
-      return parsed;
-    }
-    return parsed.invocation.mutatesRemote && !options.push
-      ? ({
-          ok: false,
-          reason:
-            "This station reads the repository and never pushes. Report what should change in your structured output.",
-        } as const)
-      : parsed;
-  };
+  const { lease, role } = options;
+  const shell: Shell = options.shell ?? eveShell;
   return defineTool({
-    approval: (ctx) => {
-      const parsed = check(ctx.toolInput?.args ?? []);
-      return parsed.ok
-        ? "not-applicable"
-        : { reason: parsed.reason, type: "denied" };
-    },
-    description: `Run a git command that talks to GitHub, in the ${REPO_DIR} checkout of ${FACTORY_REPO}: ${allowed.join(", ")}. The remote is always the factory repository; write it as origin. ${
-      options.push
-        ? `Examples: ["fetch","origin","factory/bug-fix-login"] then check the branch out in the shell with git checkout factory/bug-fix-login; ["push","origin","factory/bug-fix-login"] to deliver your committed branch. Only branches that start with ${FACTORY_BRANCH_PREFIX} can be pushed; force pushes and deleting branches are refused.`
-        : 'Example: ["fetch","origin","factory/bug-fix-login"], then check the branch out in the shell with git checkout factory/bug-fix-login.'
-    } Everything local (status, diff, checkout, commit, log) is plain git in the shell, not this tool.`,
-    async execute({ args }, ctx) {
-      const parsed = check(args);
-      if (!parsed.ok) {
-        throw new Error(parsed.reason);
+    ...bash,
+    approval: bashPolicy(role),
+    description: `${bash.description}\n\n${GITHUB_NOTES[role]}`,
+    async execute(input: BashToolInput, ctx): Promise<BashToolOutput> {
+      const analysis = analyzeCommand(input.command);
+      if (analysis.kind === "plain") {
+        return await shell(input, ctx);
       }
-      const sandbox = await ctx.getSandbox(options.environment);
-      return await runGitNetwork(sandbox, parsed.invocation, options.lease);
+      const sandbox: ToolSandbox = await ctx.getSandbox(options.environment);
+      if (analysis.kind === "push") {
+        return await runPush(sandbox, analysis, role, lease);
+      }
+      if (analysis.kind === "gh" && !onlyReads(analysis.steps)) {
+        return await runGhSteps(sandbox, analysis.steps, role, lease);
+      }
+      try {
+        return await withShellLease(
+          sandbox,
+          lease ?? {},
+          async ({ placeholder, redact }) => {
+            const output = await shell(
+              {
+                ...input,
+                command: `${leaseExports(placeholder, role)}\n${input.command}`,
+              },
+              ctx
+            );
+            return {
+              ...output,
+              stderr: redact(output.stderr),
+              stdout: redact(output.stdout),
+            };
+          }
+        );
+      } catch (error) {
+        if (!(error instanceof NarrowTokenError)) {
+          throw error;
+        }
+        return await runWithoutShell(
+          sandbox,
+          input.command,
+          analysis,
+          role,
+          lease,
+          error
+        );
+      }
     },
-    inputSchema: argsSchema(MAX_GIT_ARGS, '["fetch","origin","factory/bug-x"]'),
-    toModelOutput: cliOutput,
   });
 };

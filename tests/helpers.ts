@@ -1,4 +1,5 @@
 import type { SessionAuthContext } from "eve/context";
+import { shellQuote } from "#lib/github/cli.js";
 import {
   autonomousForTicket,
   stampAutonomous,
@@ -74,3 +75,10 @@ export const reasonOf = (status: unknown): string =>
   typeof status === "object" && status !== null
     ? String((status as { reason?: unknown }).reason ?? "")
     : "";
+
+/**
+ * Writes a `gh` argv as the `bash` command a model would type for it, every
+ * argument single-quoted so the words survive exactly.
+ */
+export const ghCommand = (args: readonly string[]): string =>
+  ["gh", ...args.map(shellQuote)].join(" ");

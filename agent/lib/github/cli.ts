@@ -5,13 +5,18 @@ import { FACTORY_REPO } from "../constants.js";
  * concerned.
  *
  * @remarks
- * The factory drives GitHub through the real `gh` binary, so the argv is the
- * only thing standing between the model and the installation token's full
- * reach. Every invocation is parsed against the allowlist in this module and
- * reduced to one effect; `agent/lib/github/approval.ts` maps the effect and
- * the caller's trust class to run / park / deny. Anything the allowlist
- * doesn't name is `forbidden`, including every flag it doesn't name, so a new
- * `gh` feature is unreachable until someone decides what it is.
+ * Agents write `gh` commands in their shell. One that only reads runs there
+ * under a read-only credential. One that changes GitHub can only run when
+ * the whole `bash` command is a list of `gh` commands with literal words
+ * (`agent/lib/github/shell.ts`): each command's words are parsed against the
+ * allowlist in this module and reduced to one effect, and
+ * `agent/lib/github/approval.ts` maps the effect and the caller's trust
+ * class to run / park / deny. The runtime then runs the parsed words itself,
+ * under a credential that can write issues and pull requests, so this parse
+ * is what stands between the model and that credential. Anything the
+ * allowlist doesn't name is `forbidden`, including every flag it doesn't
+ * name, so a new `gh` feature is unreachable until someone decides what it
+ * is.
  *
  * - `read`: no change to GitHub.
  * - `label`: only adds or removes labels on one issue or pull request.
@@ -540,6 +545,31 @@ const COMMANDS: Readonly<Record<string, CommandSpec>> = {
 export const GH_COMMANDS: readonly string[] = Object.keys(COMMANDS).sort();
 
 /**
+ * The commands that change something on GitHub, whatever their arguments.
+ *
+ * @remarks
+ * Every other command in the allowlist only reads. The sandbox's `gh`
+ * wrapper uses the list to send a write back to the caller with the form
+ * that works, before it reaches GitHub (`agent/lib/github/shims.ts`).
+ * `tests/github/gh-cli.test.ts` holds it against the effects the parser
+ * reports.
+ */
+export const GH_WRITE_COMMANDS: readonly string[] = [
+  "issue close",
+  "issue comment",
+  "issue create",
+  "issue edit",
+  "issue reopen",
+  "label create",
+  "pr close",
+  "pr comment",
+  "pr create",
+  "pr edit",
+  "pr ready",
+  "pr reopen",
+];
+
+/**
  * The long flags each allowlisted command accepts, besides `--repo`.
  *
  * @remarks
@@ -828,7 +858,7 @@ const parseFlags = (
 
 const checkShape = (args: readonly string[]): string | null => {
   if (args.length === 0) {
-    return 'Pass a gh command, like ["issue", "view", "12"].';
+    return "Pass a gh command, like gh issue view 12.";
   }
   if (args.length > MAX_GH_ARGS) {
     return `Too many arguments (limit ${MAX_GH_ARGS}).`;
@@ -845,7 +875,14 @@ const checkShape = (args: readonly string[]): string | null => {
 };
 
 /**
- * Parses a `gh` argv against the allowlist.
+ * Parses the words of one `gh` command against the allowlist.
+ *
+ * @remarks
+ * The words come from the shell lexer (`analyzeCommand` in `shell.ts`), which
+ * hands over literal words only, or from the factory's own code (the triage
+ * and CI tools). A caller's `--body-file` has already been turned into
+ * `--body` by `inlineBodyFiles` by the time the words arrive here; the
+ * allowlist itself never accepts `--body-file`.
  *
  * @param argv - The arguments after `gh` (a leading `gh` is tolerated).
  * @returns The normalized invocation and its effect, or the reason it is
@@ -918,6 +955,17 @@ export const shellQuote = (arg: string): string =>
   `'${arg.replaceAll("'", "'\\''")}'`;
 
 /**
+ * `PATH` for a command the runtime runs itself under a lease.
+ *
+ * @remarks
+ * `gh` shells out to `git`, and `git` to its helpers. This keeps those
+ * lookups in the image's own directories: nothing in a directory the agent
+ * writes to, and not the sandbox's `gh` and `git` wrappers in
+ * `/usr/local/bin`, which are for the agent's shell.
+ */
+export const RUNNER_PATH = "/usr/bin:/bin";
+
+/**
  * Environment every `gh` invocation runs with, besides the per-call
  * placeholder token the runner adds.
  *
@@ -931,7 +979,7 @@ export const GH_ENVIRONMENT: Readonly<Record<string, string>> = {
   GH_PROMPT_DISABLED: "1",
   GH_REPO: FACTORY_REPO,
   NO_COLOR: "1",
-  PATH: "/usr/local/bin:/usr/bin:/bin",
+  PATH: RUNNER_PATH,
 };
 
 /** Where the sandbox image's package manager installs the GitHub CLI. */
@@ -959,8 +1007,11 @@ export interface BodyFile {
  * The rewrite works from the positions the parser recorded
  * ({@link GhInvocation.bodies}), so the command that runs is the command
  * that was classified and approved, token for token, with only the body
- * arguments swapped. `--body-file` is not something a caller can pass; it
- * only ever appears here, pointing at a file this function named.
+ * arguments swapped. The allowlist itself never accepts `--body-file`: when
+ * an agent passes one, `inlineBodyFiles` in `shell.ts` turns it into
+ * `--body` before parsing and the runtime reads the file's text into it. So
+ * the only `--body-file` that reaches `gh` is the one written here,
+ * pointing at a file this function named.
  *
  * @param pathFor - Names the file for the nth body.
  */

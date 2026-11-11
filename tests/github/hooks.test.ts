@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { ghPolicy, stationPolicy } from "#lib/github/approval.js";
+import { bashPolicy, stationPolicy } from "#lib/github/approval.js";
 import {
   CI_FIX_TASK,
   FACTORY_INTAKE_TASK,
@@ -17,13 +17,16 @@ import {
   isSummaryOnly,
   isTrusted,
 } from "#lib/trust.js";
-import { approvalContext, outcome } from "../helpers.js";
+import { approvalContext, ghCommand, outcome } from "../helpers.js";
 
 /**
  * The dispatch hooks decide, on the signed webhook, whether a GitHub event
  * starts a run and as whom. These tests drive them with webhook-shaped
  * inputs and then feed the resulting identity to the real approval policy,
  * so each case checks the outcome that matters: what that run could do.
+ *
+ * The policy is the one on the orchestrator's `bash` tool, asked about the
+ * `gh` command a dispatched run would type.
  */
 type Role = "admin" | "maintain" | "write" | "triage" | "read" | "none";
 
@@ -85,7 +88,11 @@ const issue = (action: string, labels: unknown) =>
   ({ action, issueNumber: 12, raw: { labels } }) as never;
 
 const can = (auth: unknown, ...args: string[]) =>
-  outcome(ghPolicy(approvalContext(auth as never, { args })));
+  outcome(
+    bashPolicy("orchestrator")(
+      approvalContext(auth as never, { command: ghCommand(args) })
+    )
+  );
 
 beforeEach(() => {
   vi.stubEnv("FACTORY_BOT_NAME", "foreman");

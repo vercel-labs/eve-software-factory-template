@@ -11,6 +11,7 @@ import {
   sanitizeCommandOutput,
 } from "./bootstrap-diagnostics.js";
 import { FALLBACK_BOT_NAME, resolveBotName } from "./bot-name.js";
+import { GIT_BINARY } from "./git-cli.js";
 import { REMOTE_URL } from "./git-remote.js";
 import { type LeaseDependencies, runLeasedGitCommand } from "./lease.js";
 import { FACTORY_TOOLING_VERSION, installFactoryTooling } from "./tooling.js";
@@ -30,11 +31,12 @@ const SNAPSHOT_OPTIONS = {
  * included.
  *
  * @remarks
- * `prepare` runs once per template snapshot and installs the tooling the
- * factory's `gh` and `git` tools invoke (`agent/lib/github/tooling.ts`).
- * The tooling version rides along in `env` because a template is keyed by
- * its own sandbox file and these options, not by imported modules: bumping
- * the version is what rebuilds every template after the installer changes.
+ * `prepare` runs once per template snapshot: it installs `gh` and pnpm and
+ * seeds the `gh` and `git` wrappers (`agent/lib/github/tooling.ts`). The
+ * tooling version rides along in `env` because a template is keyed by its
+ * own sandbox file and these options, not by imported modules. It is a
+ * digest of the install script, so a change to the installer or a wrapper
+ * rebuilds every template.
  */
 export const FACTORY_SANDBOX_CREATE_OPTIONS = {
   ...SNAPSHOT_OPTIONS,
@@ -63,11 +65,11 @@ export function createFactoryEnvironment() {
  * `origin/<branch>` as a remote-tracking branch, so a plain
  * `git checkout <branch>` fails even after the branch has been fetched.
  * Widening the refspec (configuration only, nothing extra is downloaded)
- * is what lets a station fetch a branch with its `git` tool and then check
- * it out the ordinary way.
+ * is what lets a station run `git fetch origin <branch>` and then check
+ * the branch out the ordinary way.
  */
 export const cloneCommand = (url: string): string =>
-  `git clone --depth 50 ${url} repo && git -C repo config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'`;
+  `${GIT_BINARY} clone --depth 50 ${url} repo && ${GIT_BINARY} -C repo config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'`;
 
 /**
  * Runs a command in the sandbox and throws on a nonzero exit, so a broken

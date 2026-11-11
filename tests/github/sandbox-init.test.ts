@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { GIT_BINARY } from "#lib/github/git-cli.js";
 import {
   leasePolicy,
   mintScopedToken,
@@ -58,6 +59,9 @@ const fakeSandbox = (
   return { sandbox: sandbox as never, steps };
 };
 
+/** The clone is the image's own git, by absolute path, not the wrapper. */
+const CLONE = `${GIT_BINARY} clone`;
+
 const lease = () => {
   const requests: (readonly string[] | null)[] = [];
   const mint: TokenMinter = async (permissions) => {
@@ -92,13 +96,8 @@ describe("factoryInit: a station's checkout", () => {
           ? step.command.split(" ").slice(0, 2).join(" ")
           : `policy:${step.policy === "allow-all" ? "open" : "lease"}`
       )
-    ).toEqual([
-      "git config",
-      "policy:lease",
-      "git clone",
-      "policy:open",
-      "cd repo",
-    ]);
+    ).toEqual(["git config", "policy:lease", CLONE, "policy:open", "cd repo"]);
+    expect(CLONE).toBe("/usr/bin/git clone");
     expect(steps[0]?.kind === "run" && steps[0].command).toContain(
       'user.name "foreman[bot]"'
     );
@@ -111,6 +110,10 @@ describe("factoryInit: a station's checkout", () => {
     });
     expect(steps[2]?.kind === "run" && steps[2].command).toBe(
       cloneCommand("https://github.com/acme/widgets.git")
+    );
+    // git's own lookups stay in the image's directories, past the wrappers.
+    expect(steps[2]?.kind === "run" && steps[2].env?.PATH).toBe(
+      "/usr/bin:/bin"
     );
     expect(requests[0]).toEqual([
       ...TOKEN_SCOPES["repo-read"].required,
@@ -150,7 +153,7 @@ describe("factoryInit: a station's checkout", () => {
 
   test("a repository the app cannot see is reported as a missing repository, and the lease still ends", async () => {
     const { sandbox, steps } = fakeSandbox((command) =>
-      command.startsWith("git clone")
+      command.startsWith(CLONE)
         ? {
             exitCode: 128,
             stderr:
@@ -166,7 +169,7 @@ describe("factoryInit: a station's checkout", () => {
 
   test("a refused credential is reported as an app access problem", async () => {
     const { sandbox } = fakeSandbox((command) =>
-      command.startsWith("git clone")
+      command.startsWith(CLONE)
         ? {
             exitCode: 128,
             stderr:
@@ -190,7 +193,7 @@ describe("factoryInit: a station's checkout", () => {
     ).rejects.toThrow(/Cannot access acme\/widgets/);
     expect(
       steps.some(
-        (step) => step.kind === "run" && step.command.startsWith("git clone")
+        (step) => step.kind === "run" && step.command.startsWith(CLONE)
       )
     ).toBe(false);
     expect(steps.some((step) => step.kind === "policy")).toBe(false);

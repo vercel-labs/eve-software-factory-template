@@ -3,10 +3,12 @@ import {
   bodiesToFiles,
   GH_COMMANDS,
   GH_ENVIRONMENT,
+  GH_WRITE_COMMANDS,
   ghCommandLine,
   MAX_GH_ARG_LENGTH,
   MAX_GH_ARGS,
   parseGh,
+  RUNNER_PATH,
   shellQuote,
 } from "#lib/github/cli.js";
 
@@ -508,8 +510,114 @@ describe("shellQuote and ghCommandLine", () => {
       GH_PROMPT_DISABLED: "1",
       GH_REPO: "acme/widgets",
       NO_COLOR: "1",
-      PATH: "/usr/local/bin:/usr/bin:/bin",
+      PATH: "/usr/bin:/bin",
     });
+  });
+
+  test("the runner's PATH is the image's own directories, which skips the wrappers in /usr/local/bin", () => {
+    expect(RUNNER_PATH).toBe("/usr/bin:/bin");
+    expect(GH_ENVIRONMENT.PATH).toBe(RUNNER_PATH);
+    expect(RUNNER_PATH.split(":")).not.toContain("/usr/local/bin");
+  });
+});
+
+describe("GH_WRITE_COMMANDS: the commands that always change GitHub", () => {
+  /*
+   * One valid invocation of every command on the allowlist, written out by
+   * hand. The sandbox's `gh` wrapper refuses the commands in
+   * GH_WRITE_COMMANDS by name, so the list has to agree with what the parser
+   * says each command does.
+   */
+  const REPRESENTATIVE: Record<string, string[]> = {
+    api: ["api", "repos/acme/widgets/branches"],
+    "issue close": ["issue", "close", "12"],
+    "issue comment": ["issue", "comment", "12", "--body", "note"],
+    "issue create": ["issue", "create", "--title", "t", "--body", "b"],
+    "issue edit": ["issue", "edit", "12", "--add-label", "bug"],
+    "issue list": ["issue", "list"],
+    "issue reopen": ["issue", "reopen", "12"],
+    "issue status": ["issue", "status"],
+    "issue view": ["issue", "view", "12"],
+    "label create": ["label", "create", "bug"],
+    "label list": ["label", "list"],
+    "pr checks": ["pr", "checks", "34"],
+    "pr close": ["pr", "close", "34"],
+    "pr comment": ["pr", "comment", "34", "--body", "note"],
+    "pr create": [
+      "pr",
+      "create",
+      "--head",
+      "factory/x",
+      "--title",
+      "t",
+      "--body",
+      "b",
+      "--draft",
+    ],
+    "pr diff": ["pr", "diff", "34"],
+    "pr edit": ["pr", "edit", "34", "--title", "t"],
+    "pr list": ["pr", "list"],
+    "pr ready": ["pr", "ready", "34"],
+    "pr reopen": ["pr", "reopen", "34"],
+    "pr status": ["pr", "status"],
+    "pr view": ["pr", "view", "34"],
+    "release list": ["release", "list"],
+    "release view": ["release", "view", "v1.0.0"],
+    "repo view": ["repo", "view"],
+    "run list": ["run", "list"],
+    "run view": ["run", "view", "991"],
+    "workflow list": ["workflow", "list"],
+    "workflow view": ["workflow", "view", "ci.yml"],
+  };
+
+  test("the table above covers every command on the allowlist, and nothing else", () => {
+    expect(Object.keys(REPRESENTATIVE).sort()).toEqual([...GH_COMMANDS]);
+    expect(GH_COMMANDS).toHaveLength(29);
+  });
+
+  test("every write command is on the allowlist, once", () => {
+    for (const command of GH_WRITE_COMMANDS) {
+      expect(GH_COMMANDS).toContain(command);
+    }
+    expect(new Set(GH_WRITE_COMMANDS).size).toBe(GH_WRITE_COMMANDS.length);
+  });
+
+  test("the write commands, by name", () => {
+    expect([...GH_WRITE_COMMANDS].sort()).toEqual([
+      "issue close",
+      "issue comment",
+      "issue create",
+      "issue edit",
+      "issue reopen",
+      "label create",
+      "pr close",
+      "pr comment",
+      "pr create",
+      "pr edit",
+      "pr ready",
+      "pr reopen",
+    ]);
+  });
+
+  test.each(Object.entries(REPRESENTATIVE))(
+    "gh %s is a read exactly when it is not a write command",
+    (command, argv) => {
+      // The invocation starts with the command path it stands for.
+      expect(argv.slice(0, command.split(" ").length).join(" ")).toBe(command);
+      const isRead = effectOf(...argv).kind === "read";
+      expect(isRead).toBe(!GH_WRITE_COMMANDS.includes(command));
+    }
+  );
+
+  test.each([
+    [["pr", "ready", "34", "--undo"]],
+    [["pr", "create", "--head", "factory/x", "--title", "t", "--body", "b"]],
+    [["issue", "edit", "12", "--title", "t"]],
+    [["issue", "close", "12", "--comment", "done"]],
+    [["pr", "edit", "34", "--add-label", "bug"]],
+    [["label", "create", "bug", "--force"]],
+  ])("%j, another shape of a write command, is not a read either", (argv) => {
+    expect(effectOf(...argv).kind).not.toBe("read");
   });
 });
 

@@ -29,7 +29,7 @@ export function requireEnv(name: string, example: string): string {
  * @remarks
  * Required at module load so a missing value fails discovery instead of
  * producing a factory with no target. Every surface reads this one constant:
- * the `gh` tool's pinned repository, the scope of every leased token, the
+ * the repository `gh` is pinned to, the scope of every leased token, the
  * station sandboxes' clone, and the push URL.
  */
 export const FACTORY_REPO = requireEnv("FACTORY_REPO", "acme/widgets");

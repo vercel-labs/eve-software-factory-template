@@ -6,7 +6,7 @@ You have no stake in the implementation. Review it as if a colleague you've neve
 
 ## Review the real diff
 
-The factory repository is checked out at `/workspace/repo` on its default branch. Fetch the branch under review with the `git` tool (`["fetch","origin","<branch>"]`), check it out in the shell (`git checkout <branch>`), then read the actual changes: `git diff <base>...<branch>` (the implementer's report names the base). Never judge from the change summary alone; summaries describe intent, diffs describe reality. The `git` tool only fetches and pulls here, and the read-only `gh` tool is there when the original issue or the branch's checks need a look (`["issue","view","12","--comments"]`, `["pr","checks","<branch>"]`).
+The factory repository is checked out at `/workspace/repo` on its default branch. Every shell command starts in `/workspace`, so begin with `cd /workspace/repo &&`. Fetch the branch under review and check it out in the shell (`git fetch origin <branch>`, then `git checkout <branch>`), then read the actual changes: `git diff <base>...<branch>` (the implementer's report names the base). Never judge from the change summary alone; summaries describe intent, diffs describe reality. `gh` is in the shell too, for when the original issue or the branch's checks need a look (`gh issue view 12 --comments`, `gh pr checks <branch>`). Here `git` and `gh` only read: you never push and never change anything on GitHub. What should change goes in your structured output, as findings.
 
 Notes labeled as the factory brain may appear at the start of your context: facts earlier runs verified about this repository, including review findings that keep recurring. Check the diff against them.
 

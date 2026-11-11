@@ -3,20 +3,26 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { parseGitNetwork } from "#lib/github/git-cli.js";
+import {
+  CURRENT_BRANCH_COMMAND,
+  GIT_BINARY,
+  pushCommandLine,
+} from "#lib/github/git-cli.js";
 import { REMOTE_URL, REPO_DIR } from "#lib/github/git-remote.js";
 import { cloneCommand } from "#lib/github/repo-sandbox.js";
 
 /**
- * Runs the commands the `git` tool renders with the real git binary.
+ * Runs the git commands the factory writes with the real git binary.
  *
  * @remarks
  * The parser tests check the text of each command. These check what the
  * commands do: a bare repository in a temporary directory stands in for
  * GitHub (git's own `insteadOf` rewrites the factory URL to it, for this
- * process only), a clone stands in for a station's checkout, and each
- * rendered command line runs unmodified apart from the checkout path. No
- * network is involved.
+ * process only), a clone made by `cloneCommand` stands in for a station's
+ * checkout, and each command line the runtime writes runs unmodified apart
+ * from the checkout path and where git lives on this machine. What an agent
+ * types in its own shell (`git fetch origin <branch>`, `git checkout`) runs
+ * here as plain git, in that same clone. No network is involved.
  */
 const hasGit = spawnSync("git", ["--version"]).status === 0;
 // CI sets this, so a runner without git fails the suite instead of skipping.
@@ -35,6 +41,7 @@ const identity = {
   GIT_CONFIG_NOSYSTEM: "1",
 };
 
+/** Plain git, as an agent runs it in its shell. Throws when git fails. */
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, {
     cwd,
@@ -43,16 +50,18 @@ const git = (cwd: string, ...args: string[]): string =>
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
 
-/** Runs a rendered tool command, the way the sandbox would: through a shell. */
-const runTool = (...args: string[]) => {
-  const parsed = parseGitNetwork(args);
-  if (!parsed.ok) {
-    throw new Error(parsed.reason);
-  }
-  const command = parsed.invocation.commandLine
+/**
+ * Points a command the runtime wrote at this machine: the temporary checkout
+ * for the sandbox's, and whichever git is installed for the image's.
+ */
+const localize = (command: string): string =>
+  command
     .replaceAll(`'${REPO_DIR}'`, `'${checkout}'`)
-    .replaceAll("/usr/bin/git", "git");
-  return spawnSync("bash", ["-c", command], {
+    .replaceAll(GIT_BINARY, "git");
+
+/** Runs a command the runtime wrote, the way the sandbox would: through a shell. */
+const runWritten = (command: string) =>
+  spawnSync("bash", ["-c", localize(command)], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -69,7 +78,8 @@ const runTool = (...args: string[]) => {
       GIT_TERMINAL_PROMPT: "0",
     },
   });
-};
+
+const push = (branch: string) => runWritten(pushCommandLine(branch));
 
 const commit = (cwd: string, file: string, message: string) => {
   writeFileSync(join(cwd, file), `${message}\n`);
@@ -94,11 +104,15 @@ beforeAll(() => {
   commit(seed, "feature.txt", "existing work");
   git(seed, "push", "-q", "origin", "factory/existing");
   // The station's checkout, made by the same command factoryInit runs.
-  execFileSync("bash", ["-c", cloneCommand(`file://${remote}`)], {
-    cwd: root,
-    env: { ...process.env, ...identity },
-    stdio: "ignore",
-  });
+  execFileSync(
+    "bash",
+    ["-c", cloneCommand(`file://${remote}`).replaceAll(GIT_BINARY, "git")],
+    {
+      cwd: root,
+      env: { ...process.env, ...identity },
+      stdio: "ignore",
+    }
+  );
 });
 
 afterAll(() => {
@@ -113,24 +127,56 @@ describe.runIf(required)("the CLI contract tests are required here", () => {
   });
 });
 
-describe.skipIf(!hasGit)("the git tool's commands, run for real", () => {
-  test("fetching a branch makes it available to a plain checkout in the shell", () => {
+describe.skipIf(!hasGit)("the factory's git commands, run for real", () => {
+  test("the clone command names git by absolute path and leaves a checkout in repo", () => {
+    expect(cloneCommand("https://github.com/acme/widgets.git")).toBe(
+      "/usr/bin/git clone --depth 50 https://github.com/acme/widgets.git repo && /usr/bin/git -C repo config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'"
+    );
+    expect(git(checkout, "rev-parse", "--abbrev-ref", "HEAD")).toBe("main");
+    expect(git(checkout, "config", "--get-all", "remote.origin.fetch")).toBe(
+      "+refs/heads/*:refs/remotes/origin/*"
+    );
+  });
+
+  test("a plain fetch of a branch, then a plain checkout, works in the station's clone", () => {
+    // A shallow clone knows only the default branch to begin with.
     expect(() =>
       git(checkout, "rev-parse", "--verify", "origin/factory/existing")
     ).toThrow();
 
-    const fetched = runTool("fetch", "origin", "factory/existing");
-    expect(fetched.status).toBe(0);
+    // What the station's instructions say to type, with no tool in between.
+    git(checkout, "fetch", "-q", "origin", "factory/existing");
     expect(git(checkout, "rev-parse", "origin/factory/existing")).toBe(
       git(remote, "rev-parse", "factory/existing")
     );
-
-    // What the station's instructions say to do next, with no tool involved.
     git(checkout, "checkout", "-q", "factory/existing");
     expect(git(checkout, "rev-parse", "--abbrev-ref", "HEAD")).toBe(
       "factory/existing"
     );
     expect(git(checkout, "log", "-1", "--format=%s")).toBe("existing work");
+  });
+
+  test("without the widened refspec the same two commands fail, which is why the clone sets it", () => {
+    const narrow = join(root, "narrow");
+    git(root, "clone", "-q", "--depth", "50", `file://${remote}`, narrow);
+    git(narrow, "fetch", "-q", "origin", "factory/existing");
+    expect(() => git(narrow, "checkout", "-q", "factory/existing")).toThrow(
+      /did not match/
+    );
+  });
+
+  test("the current-branch command prints the branch that is checked out", () => {
+    const current = runWritten(CURRENT_BRANCH_COMMAND);
+    expect(current.status).toBe(0);
+    expect(current.stdout).toBe("factory/existing\n");
+  });
+
+  test("the current-branch command fails on a detached HEAD, so a push has no branch to guess", () => {
+    git(checkout, "checkout", "-q", "--detach", "HEAD");
+    const current = runWritten(CURRENT_BRANCH_COMMAND);
+    expect(current.status).not.toBe(0);
+    expect(current.stdout).toBe("");
+    git(checkout, "checkout", "-q", "factory/existing");
   });
 
   test("pushing a new feature branch creates exactly that branch on the remote", () => {
@@ -140,7 +186,7 @@ describe.skipIf(!hasGit)("the git tool's commands, run for real", () => {
       .split("\n")
       .sort();
 
-    const pushed = runTool("push", "origin", "factory/new-work");
+    const pushed = push("factory/new-work");
     expect(pushed.status).toBe(0);
 
     const after = git(remote, "for-each-ref", "--format=%(refname)")
@@ -163,16 +209,40 @@ describe.skipIf(!hasGit)("the git tool's commands, run for real", () => {
 
   test("a second push to the same branch delivers a revision", () => {
     commit(checkout, "revision.txt", "address review findings");
-    expect(runTool("push", "origin", "factory/new-work").status).toBe(0);
+    expect(push("factory/new-work").status).toBe(0);
     expect(git(remote, "log", "-1", "--format=%s", "factory/new-work")).toBe(
       "address review findings"
     );
   });
 
+  test("the push sends the named branch, whichever branch is checked out", () => {
+    git(checkout, "checkout", "-q", "-b", "factory/side", "origin/main");
+    commit(checkout, "side.txt", "side work");
+    git(checkout, "checkout", "-q", "factory/new-work");
+    expect(push("factory/side").status).toBe(0);
+    expect(git(remote, "log", "-1", "--format=%s", "factory/side")).toBe(
+      "side work"
+    );
+    expect(git(remote, "log", "-1", "--format=%s", "factory/new-work")).toBe(
+      "address review findings"
+    );
+  });
+
+  test("a push of a branch that does not exist fails and leaves the remote alone", () => {
+    const before = git(remote, "for-each-ref");
+    const pushed = push("factory/never-made");
+    expect(pushed.status).not.toBe(0);
+    expect(git(remote, "for-each-ref")).toBe(before);
+    // The tracking ref is only written after a push that worked.
+    expect(() =>
+      git(checkout, "rev-parse", "--verify", "origin/factory/never-made")
+    ).toThrow();
+  });
+
   test("a push that would rewrite the remote branch is rejected by git, since force is unavailable", () => {
     git(checkout, "reset", "-q", "--hard", "HEAD~1");
     commit(checkout, "diverged.txt", "diverged history");
-    const pushed = runTool("push", "origin", "factory/new-work");
+    const pushed = push("factory/new-work");
     expect(pushed.status).not.toBe(0);
     expect(pushed.stderr).toMatch(/rejected|non-fast-forward/);
     expect(git(remote, "log", "-1", "--format=%s", "factory/new-work")).toBe(
@@ -180,46 +250,50 @@ describe.skipIf(!hasGit)("the git tool's commands, run for real", () => {
     );
   });
 
-  test("pull fast-forwards the checked-out branch from the remote", () => {
+  test("a plain pull fast-forwards the checked-out branch from the remote", () => {
     git(checkout, "reset", "-q", "--hard", "origin/factory/new-work~1");
-    const pulled = runTool("pull", "--ff-only", "origin", "factory/new-work");
-    expect(pulled.status).toBe(0);
+    git(checkout, "pull", "-q", "--ff-only", "origin", "factory/new-work");
     expect(git(checkout, "log", "-1", "--format=%s")).toBe(
       "address review findings"
     );
   });
 
-  test("ls-remote lists the remote's branches", () => {
-    const listed = runTool("ls-remote", "--heads");
-    expect(listed.status).toBe(0);
-    expect(listed.stdout).toContain("refs/heads/main");
-    expect(listed.stdout).toContain("refs/heads/factory/new-work");
-  });
-
-  test("a bare fetch refreshes every remote-tracking branch", () => {
+  test("a plain fetch with no branch brings in every branch, new ones included", () => {
     const seed = join(root, "seed");
     git(seed, "checkout", "-q", "main");
     commit(seed, "upstream.txt", "someone else merged");
     git(seed, "push", "-q", "origin", "main");
-    expect(runTool("fetch").status).toBe(0);
+    git(seed, "checkout", "-q", "-b", "factory/later");
+    commit(seed, "later.txt", "later work");
+    git(seed, "push", "-q", "origin", "factory/later");
+
+    git(checkout, "fetch", "-q");
     expect(git(checkout, "rev-parse", "origin/main")).toBe(
       git(remote, "rev-parse", "main")
+    );
+    expect(git(checkout, "rev-parse", "origin/factory/later")).toBe(
+      git(remote, "rev-parse", "factory/later")
     );
   });
 
   test("the default branch never moves, whatever the checkout's own remote config says", () => {
     const mainBefore = git(remote, "rev-parse", "main");
+    const decoy = join(root, "decoy.git");
+    git(root, "init", "-q", "--bare", decoy);
     // A model can rewrite the checkout's remotes and push defaults at will.
+    git(checkout, "config", "remote.origin.pushurl", `file://${decoy}`);
     git(checkout, "config", "remote.pushDefault", "origin");
     git(checkout, "config", "branch.factory/new-work.merge", "refs/heads/main");
     git(checkout, "config", "push.default", "upstream");
     git(checkout, "checkout", "-q", "factory/new-work");
     git(checkout, "reset", "-q", "--hard", "origin/factory/new-work");
     commit(checkout, "sneaky.txt", "try to land on main");
-    expect(runTool("push", "origin", "factory/new-work").status).toBe(0);
+    expect(push("factory/new-work").status).toBe(0);
     expect(git(remote, "rev-parse", "main")).toBe(mainBefore);
     expect(git(remote, "log", "-1", "--format=%s", "factory/new-work")).toBe(
       "try to land on main"
     );
+    // The push went to the literal URL, not to where origin now points.
+    expect(git(decoy, "for-each-ref")).toBe("");
   });
 });

@@ -9,8 +9,8 @@ How to ground a GitHub issue before the factory pipeline runs on it, or when som
 
 Running the pipeline on a duplicate wastes a full implementation cycle, and a duplicate comment on a fresh report saves everyone the most time, but only if you are right.
 
-- `triage_work_item` searches existing issues by the title's words and returns likely matches in `duplicates`. Those are candidates to read, not verdicts: open each one with `gh` (`["issue","view","42","--comments"]`) before you call anything a duplicate.
-- When the symptom could be described in other words, search further yourself: `["issue","list","--state","all","--search","<terms>"]`. Search closed issues as well as open ones: many "new" bugs were already fixed or already rejected.
+- `triage_work_item` searches existing issues by the title's words and returns likely matches in `duplicates`. Those are candidates to read, not verdicts: open each one (`gh issue view 42 --comments`) before you call anything a duplicate.
+- When the symptom could be described in other words, search further yourself: `gh issue list --state all --search "<terms>"`. Search closed issues as well as open ones: many "new" bugs were already fixed or already rejected.
 - Search by the error message, the API or feature name, and a plain description of the symptom. One search is not enough; reporters describe the same bug in different words.
 - Treat it as a duplicate only when the underlying cause matches, not just the surface symptom. Two crashes with the same error text can have different roots.
 - When it is a duplicate of an open issue: comment linking the original by number, apply the repo's duplicate label if one exists, and note anything the new report adds (a new environment, a cleaner reproduction) on the original. Don't run the pipeline twice for one problem. An unattended run can comment only on the thread it started from, so there it links the original from its own thread and leaves the note on the original to a person.
@@ -21,7 +21,7 @@ Running the pipeline on a duplicate wastes a full implementation cycle, and a du
 
 Every repo has its own label taxonomy, and an invented label is worse than none.
 
-- `triage_work_item` chooses from the repo's existing labels and applies them, so in the usual case there is nothing left to label. When you correct its choice by hand, list the labels first (`["label","list"]`) and work only from that set. Never create a label or apply a name you assume exists.
+- `triage_work_item` chooses from the repo's existing labels and applies them, so in the usual case there is nothing left to label. When you correct its choice by hand, list the labels first (`gh label list`) and work only from that set. Never create a label or apply a name you assume exists.
 - Read the label descriptions when they exist; "bug" versus "regression" versus "confirmed" often carry specific local meaning.
 - Apply the fewest labels that place the issue: usually one for type (bug, feature, question) and one for area or status when the repo has them.
 - Remove a label only when it is clearly wrong for the issue, and say why in a comment when the removal isn't obvious.

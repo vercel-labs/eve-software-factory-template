@@ -1,16 +1,19 @@
 import type { SessionStreamEvent } from "eve/client";
 import { type GhEffect, parseGh } from "#lib/github/cli.js";
+import { analyzeCommand, inlineBodyFiles } from "#lib/github/shell.js";
 
 /**
- * The orchestrator's one GitHub tool: the real GitHub CLI, called with
- * `{ args: string[] }`.
+ * The tool every GitHub operation goes through: the agent's shell, called
+ * with `{ command: string }`.
  *
  * @remarks
- * Every GitHub read and write goes through this single tool, so its name says
- * nothing about what a call does. Evals classify a call by its argv instead,
- * with the project's own parser (see {@link ghEffectKind}).
+ * The orchestrator runs the real `gh` in its shell, so the tool's name says
+ * nothing about what a call does. Evals classify a call by its command
+ * instead, with the project's own code: `analyzeCommand` sorts the command
+ * the way the tool does, and each `gh` command in it is parsed against the
+ * allowlist (see {@link ghCalls} and {@link bashWritesGitHub}).
  */
-export const GH_TOOL = "gh";
+export const BASH_TOOL = "bash";
 
 /**
  * The decision-model triage tool. It is the first step for every work item,
@@ -149,80 +152,141 @@ export function calledBeforeAny(
   );
 }
 
-const ghArgs = (input: unknown): readonly string[] | null => {
-  if (typeof input !== "object" || input === null || !("args" in input)) {
+const bashCommand = (input: unknown): string | null => {
+  if (typeof input !== "object" || input === null || !("command" in input)) {
     return null;
   }
-  const { args } = input;
-  return Array.isArray(args) && args.every((arg) => typeof arg === "string")
-    ? args
-    : null;
-};
-
-const parseGhInput = (input: unknown) => {
-  const args = ghArgs(input);
-  return args === null ? null : parseGh(args);
+  const { command } = input;
+  return typeof command === "string" ? command : null;
 };
 
 /**
- * Classifies a `gh` tool input by what it does to the repository, using the
- * same parser the tool's approval policy runs on (`agent/lib/github/cli.ts`).
+ * One `gh` command in a `bash` call, as the allowlist reads it.
+ */
+export interface GhCall {
+  /** The words after `gh`, as the shell lexer read them. */
+  readonly argv: readonly string[];
+  /** The command path (like `issue create`), or `null` when the allowlist refuses the command. */
+  readonly command: string | null;
+  /** What the command does to the repository; `forbidden` when the allowlist refuses it. */
+  readonly effect: GhEffect["kind"];
+}
+
+const classifyGh = (argv: readonly string[]): GhCall => {
+  const inlined = inlineBodyFiles(argv);
+  const parsed = "reason" in inlined ? null : parseGh(inlined.argv);
+  return parsed?.ok
+    ? {
+        argv,
+        command: parsed.invocation.command,
+        effect: parsed.invocation.effect.kind,
+      }
+    : { argv, command: null, effect: "forbidden" };
+};
+
+/**
+ * Reads a `bash` tool input the way the tool's approval policy does
+ * (`agent/lib/github/approval.ts`): when the whole command is a list of `gh`
+ * commands with literal words, returns each one with its command path and
+ * effect.
+ *
+ * @returns One entry per `gh` command, in order. Empty for every other
+ * command, including one that names `gh` inside a pipe or a script: only a
+ * command of this shape is parsed, approved, and given a credential that
+ * can write.
+ */
+export function ghCalls(input: unknown): GhCall[] {
+  const command = bashCommand(input);
+  if (command === null) {
+    return [];
+  }
+  const analysis = analyzeCommand(command);
+  return analysis.kind === "gh"
+    ? analysis.steps.map((step) => classifyGh(step.argv))
+    : [];
+}
+
+/**
+ * Whether a `bash` tool input asks for a change on GitHub.
  *
  * @remarks
- * This is deny-by-default: an input counts as a `read` only when the parser
- * accepts the argv and names it a read. An argv the allowlist refuses, a
- * malformed input, and an input the stream kept only by reference all come
- * back `forbidden`, so a `gh` command nobody has classified yet fails every
- * read-only eval until someone decides what it is.
+ * This is deny-by-default. A command counts as harmless only when it is one
+ * of three things:
+ *
+ * - `plain`: it names neither `gh` nor a networked `git` command, so it
+ *   runs with no credential at all.
+ * - `shell`: it names them in a shape the runtime does not parse (a pipe, a
+ *   variable, a script). Such a command runs under a read-only credential,
+ *   so it can only read, by construction, whatever it contains.
+ * - a list of `gh` commands in which every one parses to a `read`.
+ *
+ * Everything else counts as a write: a `gh` list with a label, comment, or
+ * any other non-read command, a `gh` command the allowlist refuses, a
+ * `git push`, and an input the stream kept only by reference. So a `gh`
+ * command nobody has classified yet fails every read-only eval until
+ * someone decides what it is.
  */
-export function ghEffectKind(input: unknown): GhEffect["kind"] {
-  const parsed = parseGhInput(input);
-  return parsed?.ok ? parsed.invocation.effect.kind : "forbidden";
+export function bashWritesGitHub(input: unknown): boolean {
+  const command = bashCommand(input);
+  if (command === null) {
+    return true;
+  }
+  const analysis = analyzeCommand(command);
+  switch (analysis.kind) {
+    case "plain":
+    case "shell":
+      return false;
+    case "gh":
+      return analysis.steps.some(
+        (step) => classifyGh(step.argv).effect !== "read"
+      );
+    case "push":
+      return true;
+    default:
+      return analysis satisfies never;
+  }
 }
 
 /**
- * The command path of a `gh` tool input (like `issue create`), or `null`
- * when the allowlist refuses the argv.
- */
-export function ghCommand(input: unknown): string | null {
-  const parsed = parseGhInput(input);
-  return parsed?.ok ? parsed.invocation.command : null;
-}
-
-/**
- * Builds an input matcher for `calledTool("gh", { input })` and
- * `requireInteraction({ toolName: "gh", input })`: the argv must parse to
- * the given command path and effect.
+ * Builds an input matcher for `calledTool("bash", { input })` and
+ * `requireInteraction({ toolName: "bash", input })`: the command must be a
+ * list of `gh` commands, one of which parses to the given command path and
+ * effect.
  */
 export const ghInput =
   (expected: { command: string; effect: GhEffect["kind"] }) =>
   (input: unknown): boolean =>
-    ghCommand(input) === expected.command &&
-    ghEffectKind(input) === expected.effect;
+    ghCalls(input).some(
+      (call) =>
+        call.command === expected.command && call.effect === expected.effect
+    );
 
 /**
- * The `gh` calls among `requests` that are anything other than a read:
- * labels, comments, issue and pull request writes, ship-gate commands, and
- * every argv the allowlist refuses.
+ * The `bash` calls among `requests` that ask for a change on GitHub: labels,
+ * comments, issue and pull request writes, ship-gate commands, a push, and
+ * every `gh` command the allowlist refuses (see {@link bashWritesGitHub}).
  */
 export function ghWrites(requests: readonly ToolRequest[]): ToolRequest[] {
   return requests.filter(
-    (request) =>
-      request.name === GH_TOOL && ghEffectKind(request.input) !== "read"
+    (request) => request.name === BASH_TOOL && bashWritesGitHub(request.input)
   );
 }
 
 const LABEL_FLAG_PATTERN = /^--(?:add|remove)-label(?:=|$)/;
 
 /**
- * The `gh` calls among `requests` that change labels on an issue or pull
- * request: a pure label edit, or a wider edit that carries a label flag.
+ * The `bash` calls among `requests` that change labels on an issue or pull
+ * request with `gh`: a pure label edit, or a wider edit that carries a label
+ * flag.
  */
 export function ghLabelWrites(requests: readonly ToolRequest[]): ToolRequest[] {
-  return ghWrites(requests).filter(
-    (request) =>
-      ghEffectKind(request.input) === "label" ||
-      (ghArgs(request.input) ?? []).some((arg) => LABEL_FLAG_PATTERN.test(arg))
+  return ghWrites(requests).filter((request) =>
+    ghCalls(request.input).some(
+      (call) =>
+        call.effect === "label" ||
+        (call.effect !== "read" &&
+          call.argv.some((arg) => LABEL_FLAG_PATTERN.test(arg)))
+    )
   );
 }
 
@@ -250,13 +314,14 @@ export function triageAppliesLabels(
 }
 
 /**
- * Every requested call that writes to GitHub: a non-read `gh` call (see
- * {@link ghWrites}) or a `triage_work_item` call that applies labels.
+ * Every requested call that writes to GitHub: a `bash` call that asks for a
+ * change (see {@link ghWrites}) or a `triage_work_item` call that applies
+ * labels.
  */
 export function githubWrites(requests: readonly ToolRequest[]): ToolRequest[] {
   return requests.filter(
     (request) =>
-      (request.name === GH_TOOL && ghEffectKind(request.input) !== "read") ||
+      (request.name === BASH_TOOL && bashWritesGitHub(request.input)) ||
       (request.name === TRIAGE_TOOL && triageAppliesLabels(request.input))
   );
 }
@@ -265,16 +330,16 @@ export function githubWrites(requests: readonly ToolRequest[]): ToolRequest[] {
  * Label for {@link noGithubWrites} in `t.eventsSatisfy(label, predicate)`.
  */
 export const NO_GITHUB_WRITES =
-  "no GitHub write was requested: every gh call is an allowlisted read and triage applies no labels";
+  "no GitHub write was requested: no bash command pushes or runs a gh command other than an allowlisted read, and triage applies no labels";
 
 /**
  * `eventsSatisfy` predicate: no GitHub write was requested during the run,
  * whether or not it would have been approved.
  *
  * @remarks
- * This is the deny-by-default check read-only evals share. It replaces
- * `notCalledTool` over a list of write tools, which stopped meaning anything
- * once every GitHub operation became one `gh` tool.
+ * This is the deny-by-default check read-only evals share. A list of write
+ * tools to assert `notCalledTool` over would mean nothing here: every GitHub
+ * operation is a `bash` call, and only its command says what it does.
  */
 export function noGithubWrites(events: readonly SessionStreamEvent[]): boolean {
   return githubWrites(toolRequests(events)).length === 0;

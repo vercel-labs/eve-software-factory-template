@@ -1,137 +1,256 @@
 import { describe, expect, test } from "vitest";
-import { parseGitNetwork } from "#lib/github/git-cli.js";
+import {
+  CURRENT_BRANCH_COMMAND,
+  GIT_BINARY,
+  isRepoDirectory,
+  MAX_FETCH_ARGS,
+  MAX_PUSH_ARGS,
+  parseGitFetch,
+  parseGitPush,
+  pushCommandLine,
+} from "#lib/github/git-cli.js";
 import { validateBranch, validateRef } from "#lib/github/git-remote.js";
 
-const URL = "'https://github.com/acme/widgets.git'";
-const GIT = "/usr/bin/git -C '/workspace/repo'";
-
-const lineOf = (...argv: string[]): string => {
-  const result = parseGitNetwork(argv);
+/** The branch a push was accepted for; null means the checked-out branch. */
+const branchOf = (...args: string[]): string | null => {
+  const result = parseGitPush(args);
   if (!result.ok) {
     throw new Error(
-      `expected git ${argv.join(" ")} to parse: ${result.reason}`
+      `expected git push ${args.join(" ")} to parse: ${result.reason}`
     );
   }
-  return result.invocation.commandLine;
+  return result.push.branch;
 };
 
-const refusalOf = (...argv: string[]): string => {
-  const result = parseGitNetwork(argv);
+const refusalOf = (...args: string[]): string => {
+  const result = parseGitPush(args);
   if (result.ok) {
-    throw new Error(`expected git ${argv.join(" ")} to be refused`);
+    throw new Error(`expected git push ${args.join(" ")} to be refused`);
   }
   return result.reason;
 };
 
-describe("parseGitNetwork: the remote is always the literal factory URL", () => {
-  test("fetch with no branch updates every remote-tracking branch", () => {
-    expect(lineOf("fetch")).toBe(
-      `${GIT} fetch ${URL} '+refs/heads/*:refs/remotes/origin/*'`
-    );
-    expect(lineOf("fetch", "origin")).toBe(lineOf("fetch"));
+describe("parseGitPush: what a push may name", () => {
+  test.each<[string[], string | null]>([
+    // No branch named: the caller resolves the checked-out one and checks it.
+    [[], null],
+    [["origin"], null],
+    [["origin", "HEAD"], null],
+    [["-u", "origin", "HEAD"], null],
+    [["-u"], null],
+    // A branch of the factory's own.
+    [["origin", "factory/bug-x"], "factory/bug-x"],
+    [
+      ["origin", "factory/feature-add-export.v2"],
+      "factory/feature-add-export.v2",
+    ],
+    // The upstream flags are accepted for familiarity, wherever they sit.
+    [["-u", "origin", "factory/bug-x"], "factory/bug-x"],
+    [["--set-upstream", "origin", "factory/bug-x"], "factory/bug-x"],
+    [["origin", "-u", "factory/bug-x"], "factory/bug-x"],
+    [["origin", "factory/bug-x", "-u"], "factory/bug-x"],
+  ])("git push %j pushes %j", (args, branch) => {
+    expect(parseGitPush(args)).toEqual({ ok: true, push: { branch } });
   });
 
-  test("fetch of a branch updates its remote-tracking ref", () => {
-    expect(lineOf("fetch", "origin", "factory/bug-x", "--depth", "50")).toBe(
-      `${GIT} fetch '--depth' '50' ${URL} '+refs/heads/factory/bug-x:refs/remotes/origin/factory/bug-x'`
+  test("the argument limit counts flags, and a push at the limit is read", () => {
+    const flags = new Array<string>(MAX_PUSH_ARGS - 2).fill("-u");
+    expect(MAX_PUSH_ARGS).toBe(8);
+    expect(branchOf(...flags, "origin", "factory/x")).toBe("factory/x");
+    expect(refusalOf(...flags, "-u", "origin", "factory/x")).toBe(
+      "Too many arguments (limit 8)."
     );
-  });
-
-  test("fetch may name the default branch, which is only a read", () => {
-    expect(parseGitNetwork(["fetch", "origin", "main"]).ok).toBe(true);
-  });
-
-  test("push updates exactly the branch it names, then the tracking ref", () => {
-    expect(lineOf("push", "origin", "factory/bug-x")).toBe(
-      `${GIT} push ${URL} 'refs/heads/factory/bug-x:refs/heads/factory/bug-x' && ${GIT} update-ref 'refs/remotes/origin/factory/bug-x' 'refs/heads/factory/bug-x'`
-    );
-    expect(lineOf("git", "push", "-u", "origin", "factory/bug-x")).toBe(
-      lineOf("push", "factory/bug-x")
-    );
-  });
-
-  test("pull and ls-remote", () => {
-    expect(lineOf("pull", "--ff-only", "origin", "factory/bug-x")).toBe(
-      `${GIT} pull '--ff-only' ${URL} 'refs/heads/factory/bug-x'`
-    );
-    expect(lineOf("ls-remote", "--heads")).toBe(
-      `${GIT} ls-remote '--heads' ${URL}`
-    );
-  });
-
-  test("only push is marked as changing the remote", () => {
-    const push = parseGitNetwork(["push", "origin", "factory/x"]);
-    const fetch = parseGitNetwork(["fetch"]);
-    expect(push.ok && push.invocation.mutatesRemote).toBe(true);
-    expect(fetch.ok && fetch.invocation.mutatesRemote).toBe(false);
   });
 });
 
-describe("parseGitNetwork: refusals", () => {
-  test.each([["main"], ["master"]])("push to %s is refused", (branch) => {
-    expect(refusalOf("push", "origin", branch)).toMatch(/not allowed/);
-  });
+describe("parseGitPush: refusals", () => {
+  test.each([["main"], ["master"], ["Main"], ["MASTER"]])(
+    "a push to %s is refused, in any letter case",
+    (branch) => {
+      expect(refusalOf("origin", branch)).toBe(
+        `Direct pushes to ${branch} are not allowed. Push a feature branch and open a pull request.`
+      );
+    }
+  );
 
   test.each([
-    [["push", "origin", "factory/x:main"]],
-    [["push", "origin", "+factory/x"]],
-    [["push", "origin", "refs/heads/main"]],
-    [["push", "origin", "HEAD"]],
-    [["push", "origin", "HEAD:main"]],
-    [["push", "origin", "factory/../main"]],
-    [["push", "origin", "factory/x; rm -rf /"]],
-    [["push", "origin", "$(id)"]],
-    [["push", "origin", "a b"]],
-  ])("%j is refused: not a plain branch", (argv) => {
-    expect(refusalOf(...argv)).toMatch(
-      /not a valid branch name|not a plain branch name/
+    ["develop"],
+    ["production"],
+    ["release/1.0"],
+    ["gh-pages"],
+    ["feature/login"],
+    ["factory"],
+    ["my-factory/x"],
+    ["Factory/x"],
+    // The remote's name is not a branch either.
+    ["origin"],
+  ])("a push to %s is refused: not one of the factory's branches", (branch) => {
+    expect(refusalOf("origin", branch)).toBe(
+      `"${branch}" is not one of the factory's own branches. Push a branch named factory/<type>-<short-slug>.`
     );
   });
 
   test.each([
-    [["push", "--force", "origin", "factory/x"]],
-    [["push", "-f", "origin", "factory/x"]],
-    [["push", "--force-with-lease", "origin", "factory/x"]],
-    [["push", "--delete", "origin", "factory/x"]],
-    [["push", "--mirror"]],
-    [["push", "--all"]],
-    [["push", "--tags"]],
-    [["push", "--no-verify", "origin", "factory/x"]],
-    [["fetch", "--upload-pack", "sh -c id"]],
-    [["fetch", "--depth", "many"]],
-    [["ls-remote", "--upload-pack=evil"]],
-    [["pull", "--allow-unrelated-histories", "origin", "factory/x"]],
-  ])("%j is refused: flag outside the allowlist", (argv) => {
-    expect(refusalOf(...argv)).toMatch(/does not accept/);
-  });
-
-  test("another remote, a URL, or a second branch is refused", () => {
-    expect(
-      refusalOf("push", "https://github.com/evil/repo.git", "factory/x")
-    ).toMatch(/not a valid branch name|at most/);
-    expect(refusalOf("push", "upstream", "factory/x")).toMatch(/at most 1/);
-    expect(refusalOf("push", "origin", "factory/x", "factory/y")).toMatch(
-      /at most 1/
+    [["--force", "origin", "factory/x"], "--force"],
+    [["-f", "origin", "factory/x"], "-f"],
+    [["origin", "factory/x", "--force"], "--force"],
+    [["--force-with-lease", "origin", "factory/x"], "--force-with-lease"],
+    [
+      ["--force-with-lease=factory/x", "origin", "factory/x"],
+      "--force-with-lease=factory/x",
+    ],
+    [["--delete", "origin", "factory/x"], "--delete"],
+    [["-d", "origin", "factory/x"], "-d"],
+    [["--mirror"], "--mirror"],
+    [["--all"], "--all"],
+    [["--tags"], "--tags"],
+    [["origin", "--tags"], "--tags"],
+    [["--no-verify", "origin", "factory/x"], "--no-verify"],
+    [["--prune", "origin"], "--prune"],
+    [
+      ["--repo=https://example.test/x.git"],
+      "--repo=https://example.test/x.git",
+    ],
+    [["--receive-pack=sh", "origin", "factory/x"], "--receive-pack=sh"],
+    [["-o", "ci.skip", "origin", "factory/x"], "-o"],
+    // A cluster that starts with a tolerated flag is still another flag.
+    [["-uf", "origin", "factory/x"], "-uf"],
+    [["--", "origin", "factory/x"], "--"],
+  ])("git push %j is refused: the flag is not accepted", (args, flag) => {
+    expect(refusalOf(...args)).toBe(
+      `git push does not accept ${flag} here. Write it as: git push origin <branch>.`
     );
-  });
-
-  test("push and pull need a branch", () => {
-    expect(refusalOf("push")).toMatch(/needs a branch name/);
-    expect(refusalOf("push", "origin")).toMatch(/needs a branch name/);
-    expect(refusalOf("pull", "origin")).toMatch(/needs a branch name/);
   });
 
   test.each([
-    [["clone", "https://github.com/evil/repo.git"]],
-    [["remote", "set-url", "origin", "https://evil.example/x.git"]],
-    [["config", "--global", "credential.helper", "store"]],
-    [["commit", "-m", "x"]],
-    [["submodule", "update", "--init"]],
-    [[]],
-  ])("%j is refused: not a networked subcommand", (argv) => {
-    expect(refusalOf(...argv)).toMatch(
-      /runs only the git commands that talk to GitHub/
+    ["factory/x:main"],
+    ["factory/x:factory/x"],
+    ["HEAD:main"],
+    ["HEAD:refs/heads/main"],
+    [":factory/x"],
+    ["+factory/x"],
+    ["+factory/x:main"],
+    ["factory/../main"],
+    ["factory//x"],
+    ["factory/x; rm -rf /"],
+    ["$(id)"],
+    ["a b"],
+    ["factory/x~1"],
+    ["factory/*"],
+    [""],
+  ])("git push origin %j is refused: not a branch name", (ref) => {
+    expect(refusalOf("origin", ref)).toBe(
+      `"${ref}" is not a valid branch name.`
     );
+  });
+
+  test.each([["refs/heads/factory/x"], ["refs/heads/main"], ["refs/tags/v1"]])(
+    "git push origin %s is refused: a full ref, not a plain branch",
+    (ref) => {
+      expect(refusalOf("origin", ref)).toBe(
+        `"${ref}" is not a plain branch name. Pass the branch name without a refs/ prefix.`
+      );
+    }
+  );
+
+  test.each([
+    [["origin", "factory/x", "factory/y"]],
+    [["origin", "factory/x", "HEAD"]],
+    [["origin", "HEAD", "factory/x"]],
+    [["-u", "origin", "factory/x", "main"]],
+  ])("git push %j is refused: one branch at a time", (args) => {
+    expect(refusalOf(...args)).toBe(
+      "git push takes one branch. Push branches one at a time."
+    );
+  });
+
+  test.each([
+    [["upstream", "factory/x"]],
+    [["https://github.com/acme/widgets.git", "factory/x"]],
+    [["https://github.com/evil/repo.git", "factory/x"]],
+    [["git@github.com:acme/widgets.git", "factory/x"]],
+    [["../elsewhere", "factory/x"]],
+    [["Origin", "factory/x"]],
+    [[""]],
+    // git reads the first word as the remote, so these name no branch.
+    [["factory/x"]],
+    [["HEAD"]],
+    [["-u", "factory/x"]],
+    [["factory/x", "origin"]],
+  ])("git push %j is refused: origin is the only remote", (args) => {
+    expect(refusalOf(...args)).toBe(
+      "The only remote is origin, the factory repository. Write it as: git push origin <branch>."
+    );
+  });
+
+  test("more arguments than the limit are refused before anything is read", () => {
+    const many = new Array<string>(MAX_PUSH_ARGS + 1).fill("--force");
+    expect(refusalOf(...many)).toBe("Too many arguments (limit 8).");
+  });
+});
+
+describe("the commands the runtime writes for a push", () => {
+  const GIT = "/usr/bin/git -C '/workspace/repo'";
+
+  test("git is named by absolute path", () => {
+    expect(GIT_BINARY).toBe("/usr/bin/git");
+  });
+
+  test("the push updates exactly the branch it names on the literal repository URL, then the tracking ref", () => {
+    expect(pushCommandLine("factory/bug-x")).toBe(
+      `${GIT} push 'https://github.com/acme/widgets.git' 'refs/heads/factory/bug-x:refs/heads/factory/bug-x' && ${GIT} update-ref 'refs/remotes/origin/factory/bug-x' 'refs/heads/factory/bug-x'`
+    );
+  });
+
+  test("the remote is never the checkout's origin, which a model can rewrite", () => {
+    expect(pushCommandLine("factory/x")).not.toMatch(/\borigin\b(?!\/)/);
+  });
+
+  test("the command that reads the checked-out branch", () => {
+    expect(CURRENT_BRANCH_COMMAND).toBe(
+      "/usr/bin/git -C '/workspace/repo' symbolic-ref --short HEAD"
+    );
+  });
+});
+
+describe("isRepoDirectory", () => {
+  test.each([
+    [null],
+    ["repo"],
+    ["./repo"],
+    ["repo/"],
+    ["./repo/"],
+    ["repo//"],
+    ["/workspace/repo"],
+    ["/workspace/repo/"],
+  ])("%j is the station's checkout", (directory) => {
+    expect(isRepoDirectory(directory)).toBe(true);
+  });
+
+  test.each([
+    [""],
+    ["."],
+    [".."],
+    ["/"],
+    ["other"],
+    ["Repo"],
+    ["repo2"],
+    ["repo/sub"],
+    ["repo/.."],
+    ["repo/../other"],
+    ["../repo"],
+    ["sub/repo"],
+    ["/repo"],
+    ["/tmp/repo"],
+    ["/workspace"],
+    ["/workspace/repo/sub"],
+    ["/workspace/repo/.."],
+    ["/workspace/other"],
+    ["/workspace/../workspace/repo"],
+    ["~/repo"],
+    ["workspace/repo"],
+  ])("%j is not", (directory) => {
+    expect(isRepoDirectory(directory)).toBe(false);
   });
 });
 
@@ -200,25 +319,81 @@ describe("validateRef and validateBranch", () => {
   });
 });
 
-describe("parseGitNetwork: a push stays on the factory's branches", () => {
-  test.each([
-    ["develop"],
-    ["production"],
-    ["release/1.0"],
-    ["gh-pages"],
-    ["feature/login"],
-  ])("push to %s is refused before it reaches a sandbox", (branch) => {
-    expect(refusalOf("push", "origin", branch)).toMatch(
-      /not one of the factory's own branches/
-    );
+/**
+ * `git fetch` normally runs in the agent's shell. It is parsed here only for
+ * a deployment that cannot issue a read-only token, where the runtime runs
+ * the fetch itself.
+ */
+describe("parseGitFetch", () => {
+  const GIT = "/usr/bin/git -C '/workspace/repo' fetch";
+  const URL = "'https://github.com/acme/widgets.git'";
+  const spec = (branch: string) =>
+    `'+refs/heads/${branch}:refs/remotes/origin/${branch}'`;
+
+  test.each<[string[], string]>([
+    [[], `${GIT} ${URL} '+refs/heads/*:refs/remotes/origin/*'`],
+    [["origin"], `${GIT} ${URL} '+refs/heads/*:refs/remotes/origin/*'`],
+    [["origin", "main"], `${GIT} ${URL} ${spec("main")}`],
+    [
+      ["origin", "factory/bug-x", "main"],
+      `${GIT} ${URL} ${spec("factory/bug-x")} ${spec("main")}`,
+    ],
+    [["--prune", "origin", "main"], `${GIT} '--prune' ${URL} ${spec("main")}`],
+    [
+      ["--depth", "50", "origin", "main"],
+      `${GIT} '--depth' '50' ${URL} ${spec("main")}`,
+    ],
+    [
+      ["origin", "main", "--no-tags", "--unshallow"],
+      `${GIT} '--no-tags' '--unshallow' ${URL} ${spec("main")}`,
+    ],
+  ])(
+    "fetch %j is rendered against the literal repository URL",
+    (args, line) => {
+      expect(parseGitFetch(args)).toEqual({ commandLine: line, ok: true });
+    }
+  );
+
+  test.each<[string[], RegExp]>([
+    [["upstream", "main"], /only remote is origin/],
+    [["main"], /only remote is origin/],
+    [["https://github.com/evil/repo.git", "main"], /only remote is origin/],
+    [["origin", "refs/heads/main"], /not a plain branch name/],
+    [["origin", "HEAD"], /not a plain branch name/],
+    [["origin", "+main"], /not a valid branch name/],
+    [["origin", "main:evil"], /not a valid branch name/],
+    [["origin", "a..b"], /not a valid branch name/],
+    [["origin", "$(id)"], /not a valid branch name/],
+    [["--upload-pack=touch /tmp/x", "origin"], /does not accept --upload-pack/],
+    [["--all"], /does not accept --all/],
+    [["--tags"], /does not accept --tags/],
+    [["-f", "origin", "main"], /does not accept -f/],
+    [["--depth", "0", "origin"], /does not accept --depth/],
+    [["--depth", "x", "origin"], /does not accept --depth/],
+    [["--depth"], /does not accept --depth/],
+    [["--recurse-submodules", "origin"], /does not accept/],
+    [["-c", "core.sshCommand=id", "origin"], /does not accept -c/],
+  ])("fetch %j is refused", (args, reason) => {
+    const parsed = parseGitFetch(args);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.ok ? "" : parsed.reason).toMatch(reason);
   });
 
-  test("reading those branches is still allowed", () => {
-    for (const branch of ["develop", "release/1.0", "main"]) {
-      expect(parseGitNetwork(["fetch", "origin", branch]).ok).toBe(true);
-      expect(parseGitNetwork(["pull", "--ff-only", "origin", branch]).ok).toBe(
-        true
-      );
-    }
+  test("more arguments than the limit are refused", () => {
+    const args = [
+      "origin",
+      ...Array.from({ length: MAX_FETCH_ARGS }, () => "main"),
+    ];
+    expect(parseGitFetch(args)).toEqual({
+      ok: false,
+      reason: `Too many arguments (limit ${MAX_FETCH_ARGS}).`,
+    });
+  });
+
+  test("nothing a caller passes reaches the command unquoted", () => {
+    const parsed = parseGitFetch(["--depth", "5", "origin", "factory/a-b_c.d"]);
+    expect(parsed.ok && parsed.commandLine).toBe(
+      `${GIT} '--depth' '5' ${URL} ${spec("factory/a-b_c.d")}`
+    );
   });
 });

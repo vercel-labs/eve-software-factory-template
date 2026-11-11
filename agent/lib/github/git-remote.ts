@@ -17,12 +17,16 @@ const BRANCH_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$/;
 export const REPO_DIR = "/workspace/repo";
 
 /**
- * The URL every clone, fetch, and push targets, literally.
+ * The URL the git commands the factory writes itself target, literally:
+ * the clone, the orchestrator's checkout, and the push.
  *
  * @remarks
  * Git remote config inside a sandbox (`pushurl`, `pushDefault`, per-branch
- * remotes) is model-writable and must not be able to redirect the brokered
- * credential, so the git helpers never go through `origin`.
+ * remotes) is model-writable and must not be able to redirect a credential
+ * that can write, so the push never goes through `origin`: the word is
+ * accepted from the agent and this URL is what runs. A fetch an agent runs
+ * in its own shell does use the checkout's `origin`, under a credential
+ * that only reads.
  */
 export const REMOTE_URL = `https://github.com/${FACTORY_REPO}.git`;
 

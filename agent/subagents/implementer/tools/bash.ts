@@ -1,0 +1,8 @@
+import { bashTool } from "../../../lib/github/tools.js";
+import { environment } from "../sandbox.js";
+
+/**
+ * The implementer's shell. `gh` reads; `git push` delivers the branch, and
+ * only to the factory's own branches.
+ */
+export default bashTool({ environment, role: "implementer" });

@@ -11,10 +11,10 @@ import { FACTORY_SANDBOX_CREATE_OPTIONS } from "./lib/github/repo-sandbox.js";
  * authenticated to Vercel.
  *
  * The post-open init marks `/workspace` as a safe git directory before the GitHub channel's
- * built-in per-turn checkout runs there. The sandbox filesystem is owned by the builder uid,
- * not the session user, so without this git aborts every command with "detected dubious
- * ownership in repository at '/workspace'", the channel swallows the failed checkout, and the
- * turn runs with no working tree. The station sandboxes handle the same hazard for
+ * per-turn checkout (`agent/lib/github/checkout.ts`) runs there. The sandbox filesystem is
+ * owned by the builder uid, not the session user, so without this git aborts every command
+ * with "detected dubious ownership in repository at '/workspace'", the failed checkout is
+ * logged and swallowed, and the turn runs with no working tree. The station sandboxes handle the same hazard for
  * `/workspace/repo` in `agent/lib/github/repo-sandbox.ts`.
  *
  * @see {@link https://vercel.com/docs/sandbox | Vercel Sandbox}

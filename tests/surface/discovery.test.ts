@@ -8,8 +8,9 @@ import { type Discovery, discover, isClean } from "../../scripts/discovery.js";
  * The rest of the suite tests modules; this tests the assembled agent: which
  * tools each agent ends up with, which routes are served, which memory slots
  * are bound. Discovery is offline and needs no credentials. A tool that
- * should not exist (a shell on the orchestrator, a leftover API tool) fails
- * here even though no module-level test would notice.
+ * should not exist (a way for the orchestrator to write files, a leftover
+ * `gh` or `git` tool beside the shell) fails here even though no
+ * module-level test would notice.
  */
 let discovery: Discovery;
 
@@ -30,11 +31,11 @@ describe("discovery", () => {
 });
 
 describe("the orchestrator's tools", () => {
-  test("are exactly the routing, triage, and GitHub CLI surface", () => {
+  test("are exactly the routing and triage surface, plus a shell for git and gh", () => {
     expect(discovery.tools).toEqual(
       [
+        "bash",
         "diagnose_ci_failure",
-        "gh",
         "glob",
         "grep",
         "read_artifact",
@@ -51,8 +52,14 @@ describe("the orchestrator's tools", () => {
     );
   });
 
-  test("include no shell and no way to write files, so gh is the only process it can start", () => {
-    for (const tool of ["bash", "write_file", "edit_file", "agent"]) {
+  test("include a shell, where gh runs, and no gh or git tool beside it", () => {
+    expect(discovery.tools).toContain("bash");
+    expect(discovery.tools).not.toContain("gh");
+    expect(discovery.tools).not.toContain("git");
+  });
+
+  test("include no way to write files and no generic subagent: the orchestrator routes work, it does not write code", () => {
+    for (const tool of ["write_file", "edit_file", "agent"]) {
       expect(discovery.tools).not.toContain(tool);
     }
   });
@@ -79,22 +86,51 @@ describe("the stations", () => {
   });
 
   test.each(["analyst", "implementer", "reviewer"])(
-    "%s has the real git and gh, and none of the old branch tools",
+    "%s uses git and gh in its shell: no gh or git tool, and none of the old branch tools",
     (station) => {
       const tools = discovery.stationTools[station] ?? [];
-      expect(tools).toContain("gh");
-      expect(tools).toContain("git");
       expect(tools).toContain("bash");
+      expect(tools).not.toContain("gh");
+      expect(tools).not.toContain("git");
       expect(tools).not.toContain("push_branch");
       expect(tools).not.toContain("checkout_branch");
     }
   );
 
-  test("the text-only stations have no GitHub access at all", () => {
+  test("the stations that work in the repository have exactly these tools", () => {
+    const workbench = [
+      "bash",
+      "edit_file",
+      "glob",
+      "grep",
+      "read_artifact",
+      "read_file",
+      "web_fetch",
+      "write_file",
+    ];
+    expect(discovery.stationTools.implementer).toEqual(workbench);
+    expect(discovery.stationTools.reviewer).toEqual(workbench);
+    expect(discovery.stationTools.analyst).toEqual(
+      [...workbench, "save_artifact"].sort()
+    );
+  });
+
+  test("the text-only stations have no GitHub tool at all", () => {
     for (const station of ["classifier", "researcher"]) {
       const tools = discovery.stationTools[station] ?? [];
       expect(tools).not.toContain("gh");
       expect(tools).not.toContain("git");
+    }
+  });
+
+  test("no agent has a tool named gh or git: both are programs in the shell now", () => {
+    for (const tools of [
+      discovery.tools,
+      ...Object.values(discovery.stationTools),
+    ]) {
+      expect(tools.filter((tool) => tool === "gh" || tool === "git")).toEqual(
+        []
+      );
     }
   });
 });
