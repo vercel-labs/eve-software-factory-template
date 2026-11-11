@@ -17,10 +17,11 @@ import {
  * a turn starts, so the orchestrator can read the code. Its built-in handler
  * does that by setting a sandbox firewall policy that adds the GitHub App's
  * installation token to every git request to github.com, from any process,
- * and it never takes the policy off again. That was tolerable while the
- * orchestrator could start no process of its own. It is not now that the
- * orchestrator has a shell: a command there would push with a token that
- * holds every permission the app has.
+ * and it never takes the policy off again. Anything that ran in that
+ * sandbox afterwards could push with a token that holds every permission
+ * the app has. The orchestrator has no shell, so nothing of its own runs
+ * there, but the factory does not rest on that alone: no token is left
+ * standing on any sandbox.
  *
  * So the factory replaces the handler (`agent/channels/github.ts`) with this
  * checkout, which goes through the same credential lease as everything

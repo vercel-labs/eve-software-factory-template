@@ -36,23 +36,19 @@ const CALLER_CLASSES = Object.keys(CALLERS) as CallerClass[];
 
 /**
  * The callers nobody is watching: label intake and CI fixes, intake tickets,
- * and the summary-only run. They work from text nobody vetted, so on the
- * orchestrator they get no shell, only `gh`.
+ * and the summary-only run. Nobody can answer for them, so nothing they ask
+ * for ever waits for approval: it runs or it is denied.
  */
 const UNATTENDED = [
   "autonomous",
   "ticket",
   "summary",
 ] as const satisfies readonly CallerClass[];
-/** Everyone else keeps the orchestrator's shell. */
-const WITH_A_SHELL = [
-  "trusted",
-  "schedule",
-  "untrusted",
-  "anonymous",
-] as const satisfies readonly CallerClass[];
 
-/** What an unattended run on the orchestrator gets back for anything but `gh`. */
+/**
+ * What the orchestrator gets back for anything but `gh`, whoever is asking:
+ * it has no shell, for any caller.
+ */
 const NO_SHELL = { reason: GH_ONLY, type: "denied" };
 
 /** What a command that waits for approval gets back when its text is in a file. */
@@ -406,9 +402,10 @@ describe("the orchestrator's gh commands: the authorization matrix", () => {
 
   // `gh` alone prints the CLI's own help. It changes nothing and is not in
   // the allowlist, so it is not held to it: it is a shell command, and the
-  // wrapper in the sandbox passes it to the real gh. That makes it a
-  // question of who has a shell, like any other shell command.
-  describe("gh with no command, or asking for help, runs in the shell", () => {
+  // wrapper in a station's sandbox passes it to the real gh. That makes it
+  // a question of which agent has a shell, like any other shell command:
+  // the stations do, and the orchestrator does not.
+  describe("gh with no command, or asking for help, is a shell command: it runs where there is a shell", () => {
     const HELP = [
       "gh",
       "gh ",
@@ -426,17 +423,8 @@ describe("the orchestrator's gh commands: the authorization matrix", () => {
       expect(analyzeCommand(command)).toEqual({ kind: "shell" });
     });
 
-    test.each(WITH_A_SHELL)(
-      "orchestrator, %s: there is nothing to approve",
-      (caller) => {
-        for (const command of HELP) {
-          expect(decideCommand("orchestrator", caller, command)).toBe(RUN);
-        }
-      }
-    );
-
-    test.each(UNATTENDED)(
-      "orchestrator, %s: denied, because the run has no shell to ask gh about itself in",
+    test.each(CALLER_CLASSES)(
+      "orchestrator, %s: denied, because the orchestrator has no shell to ask gh about itself in",
       (caller) => {
         for (const command of HELP) {
           expect(decideCommand("orchestrator", caller, command)).toEqual(
@@ -463,19 +451,10 @@ describe("the orchestrator's gh commands: the authorization matrix", () => {
       expect(analyzeCommand("  \n")).toEqual({ kind: "plain" });
     });
 
-    test.each(WITH_A_SHELL)(
-      "%s: there is nothing to approve and no credential to get",
-      (caller) => {
-        const policy = bashPolicy("orchestrator");
-        for (const input of EMPTY) {
-          expect(policy(approvalContext(CALLERS[caller], input))).toBe(RUN);
-        }
-      }
-    );
-
-    // Even an empty command is a shell command, and there is no shell.
-    test.each(UNATTENDED)(
-      "%s: denied like any command that is not gh",
+    // Even an empty command is a shell command, and the orchestrator has
+    // no shell, whoever is asking.
+    test.each(CALLER_CLASSES)(
+      "orchestrator, %s: denied like any command that is not gh",
       (caller) => {
         const policy = bashPolicy("orchestrator");
         for (const input of EMPTY) {
@@ -485,6 +464,16 @@ describe("the orchestrator's gh commands: the authorization matrix", () => {
         }
       }
     );
+
+    // On a station there is nothing to approve and no credential to get.
+    test.each(STATIONS)("%s: runs for every caller", (role) => {
+      const policy = bashPolicy(role);
+      for (const input of EMPTY) {
+        for (const caller of CALLER_CLASSES) {
+          expect(policy(approvalContext(CALLERS[caller], input))).toBe(RUN);
+        }
+      }
+    });
   });
 
   test("a forged trusted attribute on the unattended principal changes nothing", () => {
@@ -633,8 +622,9 @@ describe("commands the runtime cannot read in full", () => {
     "git fetch origin main",
     "echo $(gh issue list)",
     // Each of these would be a write if it reached GitHub with a token that
-    // writes. In the shell the token only reads, so there is nothing to
-    // approve; the write simply does not happen.
+    // writes. In a station's shell the token only reads, so there is nothing
+    // to approve; the write simply does not happen. The orchestrator has no
+    // shell to run them in, so there they are denied.
     'gh issue comment 13 --body "$(cat notes.md)"',
     "gh pr merge 34 --squash > /dev/null",
     "gh pr ready 34 || true",
@@ -674,35 +664,25 @@ describe("commands the runtime cannot read in full", () => {
     }
   );
 
-  describe("the orchestrator's shell is for callers somebody answers for", () => {
-    test("the two groups below are every caller class, each once", () => {
-      expect([...UNATTENDED, ...WITH_A_SHELL].sort()).toEqual(
-        [...CALLER_CLASSES].sort()
-      );
+  /*
+   * The orchestrator works from an issue body, a stranger's pull request, a
+   * ticket, a comment, and that is so on a maintainer's run as much as on an
+   * unattended one. A shell would let that text start programs next to the
+   * commands the runtime runs with a credential that writes. So the
+   * orchestrator has none, and who is asking does not come into it.
+   */
+  describe("the orchestrator has no shell, whoever is asking", () => {
+    test("whether an agent has a shell depends on its role alone: the stations do, the orchestrator does not", () => {
+      expect(shellAvailable("orchestrator")).toBe(false);
+      expect(shellAvailable("reader")).toBe(true);
+      expect(shellAvailable("implementer")).toBe(true);
+      // There is no caller to pass: the role is the only thing it is asked.
+      expect(shellAvailable).toHaveLength(1);
     });
 
-    test.each(WITH_A_SHELL)(
-      "%s: plain and shell commands run, with nothing to approve",
-      (caller) => {
-        expect(shellAvailable("orchestrator", CALLERS[caller])).toBe(true);
-        for (const analysis of KINDS) {
-          expect(shellDecision(analysis, "orchestrator", CALLERS[caller])).toBe(
-            RUN
-          );
-        }
-        for (const command of [...PLAIN, ...SHELL]) {
-          expect(decideCommand("orchestrator", caller, command)).toBe(RUN);
-        }
-      }
-    );
-
-    // An unattended run works from an issue body, a stranger's pull request,
-    // a ticket. A shell would let that text start programs next to the
-    // commands the runtime runs with a credential that writes.
-    test.each(UNATTENDED)(
+    test.each(CALLER_CLASSES)(
       "%s: every plain and shell command is denied and told to use gh on its own",
       (caller) => {
-        expect(shellAvailable("orchestrator", CALLERS[caller])).toBe(false);
         for (const analysis of KINDS) {
           expect(
             shellDecision(analysis, "orchestrator", CALLERS[caller])
@@ -716,7 +696,7 @@ describe("commands the runtime cannot read in full", () => {
       }
     );
 
-    test.each(UNATTENDED)(
+    test.each(CALLER_CLASSES)(
       "%s: a command too long to read is a shell command, so it is denied as well",
       (caller) => {
         const command = `gh issue comment 12 --body "${"x".repeat(MAX_ANALYZED_LENGTH)}"`;
@@ -724,11 +704,14 @@ describe("commands the runtime cannot read in full", () => {
         expect(decideCommand("orchestrator", caller, command)).toEqual(
           NO_SHELL
         );
-        expect(decideCommand("orchestrator", "trusted", command)).toBe(RUN);
+        // A station reads it the same way, and has a shell to run it in.
+        for (const role of STATIONS) {
+          expect(decideCommand(role, caller, command)).toBe(RUN);
+        }
       }
     );
 
-    test.each(UNATTENDED)(
+    test.each(CALLER_CLASSES)(
       "%s: whole gh commands are still decided by the matrix, reads included",
       (caller) => {
         expect(decideCommand("orchestrator", caller, "gh issue view 12")).toBe(
@@ -744,16 +727,34 @@ describe("commands the runtime cannot read in full", () => {
       }
     );
 
-    test.each(STATIONS)("%s: every caller has a shell", (role) => {
-      for (const caller of CALLER_CLASSES) {
-        expect(shellAvailable(role, CALLERS[caller])).toBe(true);
+    // The same read with a pipe after it is no longer a whole gh command.
+    test.each(CALLER_CLASSES)(
+      "%s: what a pipe would have done is asked of gh itself, with --jq",
+      (caller) => {
+        expect(
+          decideCommand(
+            "orchestrator",
+            caller,
+            "gh pr view 34 --json title | jq .title"
+          )
+        ).toEqual(NO_SHELL);
+        expect(
+          decideCommand(
+            "orchestrator",
+            caller,
+            "gh pr view 34 --json title --jq .title"
+          )
+        ).toBe(RUN);
       }
-    });
+    );
 
     test("the denial says what does work, in words an agent can act on", () => {
       expect(GH_ONLY).toBe(
-        "This run has no shell, only gh. Run gh commands on their own: one command, or several joined with &&, every argument written out, with no pipes and no other programs. Use --json and --jq to shape the output."
+        "There is no shell here, only gh. Run gh commands on their own: one command, or several joined with &&, every argument written out, with no pipes and no other programs. Use --json and --jq to shape the output."
       );
+      // It is the same for every caller, so it speaks of the place, not of
+      // the run.
+      expect(GH_ONLY).not.toMatch(/this run/i);
       // Agent-facing text carries no em dashes.
       expect(GH_ONLY).not.toContain("—");
     });
@@ -1334,20 +1335,40 @@ describe("git push", () => {
     }
   });
 
-  test("a push with anything else on the line is not read as a push: it runs in the shell, where the credential only reads", () => {
-    for (const command of [
+  describe("a push with anything else on the line is not read as a push: it is a shell command", () => {
+    const NOT_ONLY_A_PUSH = [
       "git push origin factory/x && echo pushed",
       "git add -A && git commit -m x && git push origin factory/x",
       "git push origin factory/x 2>&1",
       "git push origin $(git branch --show-current)",
       "git -c http.extraheader=x push origin factory/x",
       "cd repo; git push origin factory/x",
-    ]) {
-      expect(analyzeCommand(command)).toEqual({ kind: "shell" });
-      for (const role of ROLES) {
-        expect(push(role, "trusted", command)).toBe(RUN);
+    ];
+
+    test("each is read as a shell command", () => {
+      for (const command of NOT_ONLY_A_PUSH) {
+        expect(analyzeCommand(command)).toEqual({ kind: "shell" });
       }
-    }
+    });
+
+    test.each(STATIONS)(
+      "%s: it runs in the shell for every caller, where the credential only reads",
+      (role) => {
+        for (const command of NOT_ONLY_A_PUSH) {
+          for (const caller of CALLER_CLASSES) {
+            expect(push(role, caller, command)).toBe(RUN);
+          }
+        }
+      }
+    );
+
+    test("orchestrator: it is denied for every caller, like any other shell command", () => {
+      for (const command of NOT_ONLY_A_PUSH) {
+        for (const caller of CALLER_CLASSES) {
+          expect(push("orchestrator", caller, command)).toEqual(NO_SHELL);
+        }
+      }
+    });
   });
 });
 

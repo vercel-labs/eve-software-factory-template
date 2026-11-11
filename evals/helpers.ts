@@ -3,12 +3,13 @@ import { type GhEffect, parseGh } from "#lib/github/cli.js";
 import { analyzeCommand, inlineBodyFiles } from "#lib/github/shell.js";
 
 /**
- * The tool every GitHub operation goes through: the agent's shell, called
- * with `{ command: string }`.
+ * The tool every GitHub operation goes through: `bash`, called with
+ * `{ command: string }`.
  *
  * @remarks
- * The orchestrator runs the real `gh` in its shell, so the tool's name says
- * nothing about what a call does. Evals classify a call by its command
+ * The orchestrator types `gh` commands into `bash` (there is no shell
+ * behind it; the runtime runs them), so the tool's name says nothing about
+ * what a call does. Evals classify a call by its command
  * instead, with the project's own code: `analyzeCommand` sorts the command
  * the way the tool does, and each `gh` command in it is parsed against the
  * allowlist (see {@link ghCalls} and {@link bashWritesGitHub}).
@@ -213,11 +214,11 @@ export function ghCalls(input: unknown): GhCall[] {
  * This is deny-by-default. A command counts as harmless only when it is one
  * of three things:
  *
- * - `plain`: it names neither `gh` nor a networked `git` command, so it
- *   runs with no credential at all.
+ * - `plain`: it names neither `gh` nor a networked `git` command. On the
+ *   orchestrator it is refused; on a station it runs with no credential.
  * - `shell`: it names them in a shape the runtime does not parse (a pipe, a
- *   variable, a script). Such a command runs under a read-only credential,
- *   so it can only read, by construction, whatever it contains.
+ *   variable, a script). On the orchestrator it is refused; on a station it
+ *   runs under a read-only credential. Either way it cannot write.
  * - a list of `gh` commands in which every one parses to a `read`.
  *
  * Everything else counts as a write: a `gh` list with a label, comment, or

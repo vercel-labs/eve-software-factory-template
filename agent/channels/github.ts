@@ -65,9 +65,8 @@ import {
  * - `turn.started` is the factory's own handler, not the channel's default.
  *   Both react to the triggering comment and check the repository out into
  *   the root sandbox, but the default leaves the installation token attached
- *   to every git request from that sandbox, where the orchestrator now has a
- *   shell. The factory's checkout runs under a read-only credential lease
- *   that ends with the command.
+ *   to every git request from that sandbox for good. The factory's checkout
+ *   runs under a read-only credential lease that ends with the command.
  * - Human-in-the-loop prompts are the channel's own (eve ≥ 0.34 posts them by
  *   default): when a session stops for approval or input, the channel renders
  *   the request as a comment with a mention-based reply instruction. Passing

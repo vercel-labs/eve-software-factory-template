@@ -5,8 +5,8 @@ import { GIT_BINARY } from "./git-cli.js";
  * The `gh` and `git` wrappers seeded into every factory sandbox.
  *
  * @remarks
- * Agents run `git` and `gh` in their shell as usual (an unattended run on
- * the orchestrator has no shell and never reaches these). The names resolve to
+ * The stations run `git` and `gh` in their shell as usual (the orchestrator
+ * has no shell and never reaches these). The names resolve to
  * these scripts, installed ahead of the real binaries on `PATH`
  * (`agent/lib/github/tooling.ts`), and each script ends by running the real
  * program with the caller's own arguments.
@@ -19,9 +19,9 @@ import { GIT_BINARY } from "./git-cli.js";
  *   firewall swaps it for a token on the way out. No token is ever in the
  *   sandbox.
  * - Pins `gh` to the factory repository and turns its prompts off.
- * - Keeps `gh` to the factory's command list, and sends a command that
- *   would change GitHub back with the words that will work, since only a
- *   command the `bash` tool can read in full gets a credential that writes.
+ * - Keeps `gh` to the factory's command list, and stops a command that
+ *   would change GitHub before it reaches GitHub, since a station only
+ *   reads it and a shell command never holds a credential that writes.
  *
  * What a wrapper is not: a security boundary. It is a file in a sandbox
  * where the agent has a shell, so anything it refuses, the real binary would
@@ -49,9 +49,6 @@ const NO_CREDENTIAL =
  * must not contain a quote, a dollar sign, a backtick, or a backslash
  * (`tests/github/shims.test.ts` holds them to that).
  */
-export const GH_WRITE_HINT =
-  "changes GitHub, so it has to be the whole bash command: only gh commands (several joined with &&), every argument written out, no pipes, variables, or redirects. For text with several lines, pass --body with a quoted heredoc, or write the text to a file and pass --body-file.";
-
 export const GH_READER_HINT =
   "changes GitHub, and this agent only reads it. Report what should change in your structured output.";
 
@@ -122,11 +119,7 @@ fi
 
 case "$path" in
   ${caseList(GH_WRITE_COMMANDS)})
-    if [ "\${${ROLE_VARIABLE}:-}" = orchestrator ]; then
-      printf '%s\\n' "gh $path ${GH_WRITE_HINT}" >&2
-    else
-      printf '%s\\n' "gh $path ${GH_READER_HINT}" >&2
-    fi
+    printf '%s\\n' "gh $path ${GH_READER_HINT}" >&2
     exit 2
     ;;
 esac

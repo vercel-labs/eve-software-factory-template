@@ -197,23 +197,28 @@ const strictest = (statuses: readonly ApprovalStatus[]): ApprovalStatus =>
   "not-applicable";
 
 /**
- * Whether a caller gets a shell on the orchestrator, or only `gh`.
+ * Whether an agent has a shell, or only `gh`.
  *
  * @remarks
- * An unattended run works from text nobody vetted: an issue body, a pull
- * request a stranger opened, a ticket. A shell in the orchestrator's sandbox
- * would let that text start programs there, next to the commands the runtime
- * runs with a credential that writes. So an unattended run on the
- * orchestrator gets no shell at all: only whole `gh` commands, which the
- * runtime parses and runs itself. That keeps the allowlist and this policy
- * the limit for those runs, the way they were before the orchestrator had a
- * shell. Stations are unaffected; their work is running code.
+ * The stations have one; their work is running code. The orchestrator does
+ * not, on any run. It routes work and talks to GitHub, and for that it needs
+ * `gh` and nothing else, so its `bash` accepts only whole `gh` commands,
+ * which the runtime parses and runs itself.
+ *
+ * The reason is where a write runs. The runtime runs an approved `gh` write
+ * in the orchestrator's sandbox, with a credential that can change issues
+ * and pull requests. If the orchestrator could start programs of its own in
+ * that sandbox, a run steered by the text it reads (an issue body, a pull
+ * request from a stranger, a comment) could leave something there to pick
+ * that credential up. With no shell there is nothing in the sandbox but
+ * what the runtime put there, and the allowlist and this policy are the
+ * limit on what the orchestrator can do to GitHub, for every caller.
  */
-export const shellAvailable = (role: ShellRole, auth: Auth): boolean =>
-  role !== "orchestrator" || !isAutonomous(auth);
+export const shellAvailable = (role: ShellRole): boolean =>
+  role !== "orchestrator";
 
 export const GH_ONLY =
-  "This run has no shell, only gh. Run gh commands on their own: one command, or several joined with &&, every argument written out, with no pipes and no other programs. Use --json and --jq to shape the output.";
+  "There is no shell here, only gh. Run gh commands on their own: one command, or several joined with &&, every argument written out, with no pipes and no other programs. Use --json and --jq to shape the output.";
 
 /** How many `gh` commands one bash command may hold. */
 export const MAX_GH_STEPS = 12;
@@ -274,8 +279,8 @@ const pushDecision = (
  * @remarks
  * - A command that talks to GitHub in no way the runtime can read in full
  *   (`plain`, `shell`) gets no credential, or one that only reads, so there
- *   is nothing to approve. It runs, except for an unattended run on the
- *   orchestrator, which has no shell (see {@link shellAvailable}).
+ *   is nothing to approve. It runs, except on the orchestrator, which has
+ *   no shell (see {@link shellAvailable}).
  * - A list of `gh` commands is held to the allowlist and to the caller's
  *   trust class, one command at a time, and the strictest outcome decides
  *   for the list. On a station only reads run.
@@ -293,7 +298,7 @@ export function shellDecision(
   switch (analysis.kind) {
     case "plain":
     case "shell":
-      return shellAvailable(role, auth) ? "not-applicable" : denied(GH_ONLY);
+      return shellAvailable(role) ? "not-applicable" : denied(GH_ONLY);
     case "gh":
       if (analysis.steps.length > MAX_GH_STEPS) {
         return denied(

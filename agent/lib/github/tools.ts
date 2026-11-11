@@ -54,12 +54,12 @@ import {
  * eve's `bash` so that works without a token ever entering the sandbox, and
  * so that what a command may change still depends on who is asking.
  *
- * One class of run is the exception: an unattended run on the orchestrator
- * has no shell at all, only whole `gh` commands that the runtime runs
- * itself (`shellAvailable` in `approval.ts` says why).
+ * The orchestrator is the exception: it has no shell at all, only whole
+ * `gh` commands that the runtime runs itself (`shellAvailable` in
+ * `approval.ts` says why). What follows is how a station's command runs.
  *
- * Otherwise, each command is sorted by `analyzeCommand` (`shell.ts`) and run
- * one of three ways:
+ * Each command is sorted by `analyzeCommand` (`shell.ts`) and run one of
+ * three ways:
  *
  * 1. Nothing that names `gh` or a networked `git` command: eve's `bash`, as
  *    is.
@@ -78,19 +78,15 @@ import {
  * Each agent mounts the tool from its own `tools/bash.ts` with its own
  * sandbox environment, since stations inherit nothing from the orchestrator.
  *
- * What this does not do: isolate a write from the rest of the sandbox. A
- * command of the third kind runs in the same sandbox where the agent has a
- * shell, and while it runs, its placeholder can be read there (the process
- * environment, a temp file name) by anything else the agent left running:
- * a command issued alongside it, or one started in the background earlier.
- * So where the agent has a shell (a station, or an attended run on the
- * orchestrator), the allowlist and the trust policy decide what a
- * well-behaved run does; for a run that has been taken over by its input,
- * the limit is what
- * the leased token can do (`repo-triage`: issues and pull requests, never
- * contents; `repo-push`: contents on the implementer). Queueing commands
- * would not change that, since a background process outlives its command.
- * Closing it needs the writes to run somewhere the agent has no shell.
+ * What this does not do: isolate the implementer's push from the rest of
+ * its sandbox. The push runs where the implementer has a shell, and while
+ * it runs its placeholder can be read there (the process environment) by
+ * anything else the implementer left running. So the branch rules decide
+ * what a well-behaved run pushes; for a run taken over by its input, the
+ * limit is the `repo-push` token: contents on the factory repository, which
+ * is why branch protection on the default branch is required. The
+ * orchestrator has no such gap, because nothing but the runtime's own
+ * commands ever runs in its sandbox.
  */
 
 type FactoryEnvironment = SandboxEnvironment<
@@ -401,7 +397,7 @@ const READS = `git and gh work here as usual, against ${FACTORY_REPO} (leave out
 
 const GITHUB_NOTES: Readonly<Record<ShellRole, string>> = {
   implementer: `${READS} gh is read-only here. To deliver your committed branch, make git push the whole command: git push origin <branch>. Only branches that start with ${FACTORY_BRANCH_PREFIX} can be pushed; force pushes and deleting branches are refused.`,
-  orchestrator: `${READS} A command that changes GitHub (comment, label, create, edit, close, reopen, gh pr create) has to be the whole command: only gh commands, joined with && when there are several, every argument written out, with no pipes, variables, or redirects. For text with several lines, or with a dollar sign or a backtick in it, use --body "$(cat <<'EOF' ... EOF)" or --body-file <path>. Examples: gh issue comment 12 --body "Classification is complete."; gh issue edit 12 --add-label bug; gh pr create --draft --head factory/bug-fix-login --base main --title "Fix login 500" --body-file pr-body.md. An unattended run has no shell, only gh: whole gh commands, no pipes, no other programs; shape output with --json and --jq. Merging and pushing are not available.`,
+  orchestrator: `Here this runs gh, the GitHub CLI, and nothing else. gh works against ${FACTORY_REPO} (leave out --repo). Every command is one gh command, or several joined with &&, with every argument written out: no pipes, no variables, no redirects, no other programs. Shape what comes back with --json and --jq. Examples: gh issue view 12 --comments; gh pr view 34 --json title,body,headRefName,isDraft; gh pr diff 34; gh run view 991 --log-failed; gh issue comment 12 --body "Classification is complete."; gh issue edit 12 --add-label bug && gh issue comment 12 --body "Labeled."; gh pr create --draft --head factory/bug-fix-login --base main --title "Fix login 500" --body "...". For text with several lines, or with a dollar sign or a backtick in it, use --body "$(cat <<'EOF' ... EOF)". Merging and pushing are not available.`,
   reader: `${READS} gh is read-only here and this agent never pushes.`,
 };
 
@@ -429,10 +425,10 @@ export const bashTool = (options: {
     description: `${bash.description}\n\n${GITHUB_NOTES[role]}`,
     async execute(input: BashToolInput, ctx): Promise<BashToolOutput> {
       const analysis = analyzeCommand(input.command);
-      // An unattended run on the orchestrator has no shell: only gh, run by
-      // the runtime. The approval policy has already said so; this holds
-      // even if it is ever bypassed.
-      const hasShell = shellAvailable(role, ctx.session.auth.current);
+      // The orchestrator has no shell: only gh, run by the runtime. The
+      // approval policy has already said so; this holds even if it is ever
+      // bypassed.
+      const hasShell = shellAvailable(role);
       if (!hasShell && analysis.kind !== "gh") {
         throw new Error(GH_ONLY);
       }

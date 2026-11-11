@@ -12,7 +12,6 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { GH_COMMANDS, GH_WRITE_COMMANDS } from "#lib/github/cli.js";
 import {
   GH_READER_HINT,
-  GH_WRITE_HINT,
   ghShim,
   gitShim,
   LEASE_VARIABLE,
@@ -178,7 +177,6 @@ describe("the wrapper scripts themselves", () => {
   });
 
   test.each([
-    ["GH_WRITE_HINT", GH_WRITE_HINT],
     ["GH_READER_HINT", GH_READER_HINT],
     ["PUSH_HINT", PUSH_HINT],
     ["NO_PUSH_HINT", NO_PUSH_HINT],
@@ -287,17 +285,9 @@ describe.each(SHELLS)("the gh wrapper, run by %s", (shell) => {
   });
 
   describe("a command that changes GitHub", () => {
-    test("the orchestrator is told how to write the command so it can run", () => {
-      const result = runGh(
-        ["issue", "close", "12", "--comment", "done"],
-        leased("orchestrator")
-      );
-      expect(result.status).toBe(2);
-      expect(result.stderr).toBe(`gh issue close ${GH_WRITE_HINT}\n`);
-      expect(result.stdout).toBe("");
-    });
-
-    test.each([["reader"], ["implementer"], [undefined]])(
+    // The orchestrator has no shell and never reaches the wrapper; the role
+    // is listed to show the wrapper would treat it the same way.
+    test.each([["reader"], ["implementer"], ["orchestrator"], [undefined]])(
       "role %j is told this agent only reads",
       (role) => {
         const result = runGh(
@@ -368,20 +358,12 @@ describe.each(SHELLS)("the gh wrapper, run by %s", (shell) => {
       ],
       // Whichever repository it names: the write is what stops it.
       [["-R", "other/repo", "pr", "ready", "34"], "pr ready"],
-    ])(
-      "a write behind the flag, %j, is still sent back with the form that works",
-      (args, path) => {
-        const asOrchestrator = runGh(args, leased("orchestrator"));
-        expect(asOrchestrator.status).toBe(2);
-        expect(asOrchestrator.stderr).toBe(`gh ${path} ${GH_WRITE_HINT}\n`);
-        expect(asOrchestrator.stdout).toBe("");
-
-        const asReader = runGh(args, leased("reader"));
-        expect(asReader.status).toBe(2);
-        expect(asReader.stderr).toBe(`gh ${path} ${GH_READER_HINT}\n`);
-        expect(asReader.stdout).toBe("");
-      }
-    );
+    ])("a write behind the flag, %j, is still stopped", (args, path) => {
+      const asReader = runGh(args, leased("reader"));
+      expect(asReader.status).toBe(2);
+      expect(asReader.stderr).toBe(`gh ${path} ${GH_READER_HINT}\n`);
+      expect(asReader.stdout).toBe("");
+    });
 
     test.each([
       [["-R", "acme/widgets", "pr", "merge", "12"], "pr merge"],

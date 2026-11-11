@@ -22,8 +22,10 @@ import { resetTokenScopeMemo, type TokenMinter } from "#lib/github/lease.js";
  * @remarks
  * This checkout exists to keep one thing from happening: the GitHub App's
  * installation token being left attached to the root sandbox's git traffic,
- * which is what eve's built-in handler does and which the orchestrator's
- * shell could then use. So the tests here are mostly about the credential:
+ * which is what eve's built-in handler does and which anything that ran in
+ * that sandbox afterwards could then use. The orchestrator has no shell, so
+ * nothing of its own runs there, but the factory does not rest on that
+ * alone. So the tests here are mostly about the credential:
  * which token is minted, that it is only reachable through a placeholder,
  * and that nothing is left behind when the command ends.
  */
@@ -184,8 +186,8 @@ describe("checkoutCommand", () => {
       [
         "mkdir -p '/workspace'",
         "/usr/bin/git -C '/workspace' init -q",
-        // The workspace outlives the turn and the orchestrator's shell can
-        // write its config, so nothing is fetched while a rule is in it.
+        // The workspace outlives the turn, so nothing is fetched while its
+        // git config holds a rewrite rule, however one got there.
         "{ for scope in --local --worktree --global --system; do if /usr/bin/git -C '/workspace' config \"$scope\" --includes --get-regexp '^url\\.' >/dev/null 2>&1; then echo 'A git URL rewrite (url.<base>.insteadOf) is configured in this sandbox. Remove it and run the command again.' >&2; exit 1; fi; done; }",
         "(/usr/bin/git -C '/workspace' remote remove origin >/dev/null 2>&1 || true)",
         `/usr/bin/git -C '/workspace' remote add origin '${REMOTE_URL}'`,
@@ -513,10 +515,11 @@ describe.skipIf(!hasGit)("the checkout command, run for real", () => {
   });
 
   /*
-   * The orchestrator's workspace is kept between turns, and its shell can
-   * write the repository's config there. A `url.<base>.insteadOf` rule would
-   * send the next turn's fetch, and the token leased for it, to another
-   * repository. The command stops before it fetches.
+   * The orchestrator's workspace is kept between turns. The orchestrator
+   * has no shell to write the repository's config there, and the checkout
+   * does not rest on that: a `url.<base>.insteadOf` rule, however it got
+   * there, would send the next turn's fetch, and the token leased for it,
+   * to another repository. The command stops before it fetches.
    */
   describe("a workspace whose git config rewrites URLs", () => {
     const REFUSED =
