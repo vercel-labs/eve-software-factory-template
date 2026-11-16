@@ -26,16 +26,18 @@ let resolvedFromConnector: string | undefined;
  *    deployer named their app. Fetched with the deployment's OIDC token and
  *    cached for the life of the instance.
  *
- * Throws when the metadata is unreachable or carries no usable slug, and the
- * failure is never cached. That contract is what the channel's lazy `botName`
- * resolution relies on: eve calls this on first use inside request handling
- * (where the OIDC token exists), caches a fulfilled name, and retries a
- * rejection on the next event, so a transient outage can't pin a wrong name.
- * Callers that need an answer no matter what catch and use
- * {@link FALLBACK_BOT_NAME}.
+ * A failure throws and is never cached. That contract is what the channel's
+ * lazy `botName` resolution relies on: eve calls this on first use inside
+ * request handling (where the OIDC token exists), caches a fulfilled name,
+ * and retries a rejection on the next event, so a transient outage can't
+ * pin a wrong name. Callers that need an answer no matter what catch and
+ * use {@link FALLBACK_BOT_NAME}.
  *
  * A hardcoded name is wrong here because the app's slug is chosen by whoever
  * registers it, and a guessed handle can belong to a real GitHub user.
+ *
+ * @throws When the connector metadata is unreachable or carries no usable
+ * slug.
  */
 export async function resolveBotName(): Promise<string> {
   const override = process.env.FACTORY_BOT_NAME ?? process.env.GITHUB_APP_SLUG;

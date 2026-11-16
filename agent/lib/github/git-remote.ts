@@ -1,6 +1,5 @@
 import type { GitHubChannelCredentials } from "eve/channels/github";
-import type { SandboxNetworkPolicy } from "eve/sandbox";
-import { FACTORY_REPO } from "../constants.js";
+import { FACTORY_BRANCH_PREFIX, FACTORY_REPO } from "../constants.js";
 
 const PROTECTED_BRANCHES = new Set(["main", "master"]);
 
@@ -12,73 +11,79 @@ const PROTECTED_BRANCHES = new Set(["main", "master"]);
  */
 const BRANCH_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$/;
 
-/**
- * Where the station sandboxes keep the factory repository checkout.
- */
+/** Where the station sandboxes keep the factory repository checkout. */
 export const REPO_DIR = "/workspace/repo";
 
 /**
- * The URL every clone, fetch, and push targets, literally.
+ * The URL the git commands the factory writes itself target, literally:
+ * the clone, the orchestrator's checkout, and the push.
  *
  * @remarks
  * Git remote config inside a sandbox (`pushurl`, `pushDefault`, per-branch
- * remotes) is model-writable and must not be able to redirect the brokered
- * credential, so the git helpers never go through `origin`.
+ * remotes) is model-writable and must not be able to redirect a credential
+ * that can write, so the push never goes through `origin`: the word is
+ * accepted from the agent and this URL is what runs. A fetch an agent runs
+ * in its own shell does use the checkout's `origin`, under a credential
+ * that only reads.
  */
 export const REMOTE_URL = `https://github.com/${FACTORY_REPO}.git`;
 
 /**
- * Returns the refusal reason, or null when the branch name may be used in a
- * git command.
+ * Checks that a name is a plain branch name, safe to interpolate into a git
+ * command.
  *
  * @remarks
- * `refs/heads/main` and `HEAD` would reach a protected branch under another
- * name, so only plain branch names are accepted, and the protected branches
- * themselves are refused outright: the factory delivers pull requests, never
- * direct pushes to the default branch.
+ * This is the shape check alone, for commands that only read (fetch, pull,
+ * ls-remote), where naming the default branch is legitimate. `refs/heads/x`
+ * and `HEAD` are refused so a ref can't be reached under another name.
+ *
+ * @returns The refusal reason, or null when the name passes.
  */
-export function validateBranch(branch: string): string | null {
-  if (
-    !BRANCH_PATTERN.test(branch) ||
-    branch.includes("..") ||
-    branch.includes("//")
-  ) {
-    return `"${branch}" is not a valid branch name.`;
+export function validateRef(ref: string): string | null {
+  if (!BRANCH_PATTERN.test(ref) || ref.includes("..") || ref.includes("//")) {
+    return `"${ref}" is not a valid branch name.`;
   }
-  if (branch.startsWith("refs/") || branch === "HEAD") {
-    return `"${branch}" is not a plain branch name. Pass the branch name without a refs/ prefix.`;
-  }
-  if (PROTECTED_BRANCHES.has(branch)) {
-    return `Direct pushes to ${branch} are not allowed. Push a feature branch and open a pull request.`;
+  if (ref.startsWith("refs/") || ref === "HEAD") {
+    return `"${ref}" is not a plain branch name. Pass the branch name without a refs/ prefix.`;
   }
   return null;
 }
 
 /**
- * Firewall policy that brokers the installation token onto egress to
- * github.com only, mirroring the shape eve's own channel checkout uses.
+ * Checks that a branch is one the factory may push.
  *
  * @remarks
- * The token never enters the sandbox process; the firewall injects the header
- * on the way out. `"*": []` keeps general egress open so package installs and
- * test runs keep working while the policy is active.
+ * {@link validateRef} plus two rules about which branches are the factory's
+ * to write:
+ *
+ * - The branch must carry the factory's own prefix (`FACTORY_BRANCH_PREFIX`,
+ *   `factory/` by default). The factory delivers its work on branches it
+ *   created and never touches anyone else's, and this is what keeps a push
+ *   off `develop`, a release branch, `gh-pages`, or whatever a repository
+ *   calls its default branch.
+ * - `main` and `master` are refused by name regardless, so the rule still
+ *   holds for a deployment that set the prefix to nothing.
+ *
+ * @returns The refusal reason, or null when the branch may be pushed.
  */
-export function brokerPolicy(installationToken: string): SandboxNetworkPolicy {
-  const authorization = `Basic ${Buffer.from(
-    `x-access-token:${installationToken}`
-  ).toString("base64")}`;
-  return {
-    allow: {
-      "*": [],
-      "github.com": [
-        { transform: [{ headers: { Authorization: authorization } }] },
-      ],
-    },
-  };
+export function validateBranch(branch: string): string | null {
+  const refusal = validateRef(branch);
+  if (refusal) {
+    return refusal;
+  }
+  if (PROTECTED_BRANCHES.has(branch.toLowerCase())) {
+    return `Direct pushes to ${branch} are not allowed. Push a feature branch and open a pull request.`;
+  }
+  if (!branch.startsWith(FACTORY_BRANCH_PREFIX)) {
+    return `"${branch}" is not one of the factory's own branches. Push a branch named ${FACTORY_BRANCH_PREFIX}<type>-<short-slug>.`;
+  }
+  return null;
 }
 
 /**
  * Resolves the Connect-managed installation token, minting when it is lazy.
+ *
+ * @throws When the connector exposes no installation token.
  */
 export async function mintInstallationToken(
   credentials: GitHubChannelCredentials

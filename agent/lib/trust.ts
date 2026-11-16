@@ -2,15 +2,17 @@ import type { SessionAuthContext } from "eve/context";
 
 /**
  * Constructed principal for unattended factory runs (an issue labeled
- * `factory`).
+ * `factory`, a red CI run on a factory pull request, or a ticket submitted
+ * through the intake API).
  *
  * @remarks
  * Real GitHub actors project as numeric `github:<id>` principals, so this
- * fixed login can never collide with one. The GitHub channel stamps it at
- * dispatch; the approval policies deny it everything except labels, progress
- * comments on its own intake issue, closing or reopening issues, and draft
- * pull requests, because an unattended turn has nobody to answer an approval
- * card and would park forever.
+ * fixed login can never collide with one. The GitHub and intake channels
+ * stamp it at dispatch; the approval policies (`github/approval.ts`) deny it
+ * everything except labels, progress comments on its own intake issue,
+ * closing or reopening issues, and draft pull requests, because an
+ * unattended turn has nobody to answer an approval card and would park
+ * forever.
  */
 export const AUTONOMOUS_PRINCIPAL = "github:foreman-factory";
 
@@ -57,10 +59,14 @@ export const INTAKE_ISSUE_ATTRIBUTE = "intakeIssue";
  * intake issue number.
  *
  * @remarks
- * The GitHub channel calls this when the factory label is applied: the
- * webhook sender's identity is replaced (the turn must never run as the
- * labeler), and the issue number is stamped so `commentPolicy` can let the
- * run narrate on its own thread and nowhere else.
+ * The GitHub channel calls this when the factory label is applied or a
+ * factory pull request's CI fails: the webhook sender's identity is replaced
+ * (the turn must never run as the labeler), and the number is stamped so
+ * `commentDecision` (`github/approval.ts`) can let the run narrate on its
+ * own thread and nowhere else.
+ *
+ * @param intakeIssue - The issue or pull request number the run was
+ * dispatched from, taken from the signed webhook, never from model input.
  */
 export function stampAutonomous(
   auth: SessionAuthContext,
@@ -78,8 +84,97 @@ export function stampAutonomous(
 }
 
 /**
- * The issue number an unattended run was dispatched from, or null when the
- * session is not an unattended run (or predates the stamp).
+ * Auth attribute narrowing what an unattended run is for.
+ *
+ * @remarks
+ * Its one value today is {@link SUMMARY_SCOPE}. A run without the attribute
+ * is an ordinary unattended run.
+ */
+export const SCOPE_ATTRIBUTE = "factoryScope";
+
+/** Scope of a run dispatched to summarize a pull request someone opened. */
+export const SUMMARY_SCOPE = "summary";
+
+/**
+ * Rewrites a channel auth into the summary-only principal for a pull
+ * request.
+ *
+ * @remarks
+ * A pull request can be opened by anyone, and its title, description, and
+ * diff are what the run reads, so this is the dispatch with the least
+ * trustworthy input the factory has. The run is therefore the unattended
+ * principal narrowed further: the approval policies let it read and post
+ * on that one pull request, and deny it everything else, the stations
+ * included. Text in a pull request can make it write a bad summary; it
+ * cannot make it push a branch or close an issue.
+ *
+ * @param pullRequest - The pull request's number, from the signed webhook.
+ */
+export function stampSummary(
+  auth: SessionAuthContext,
+  pullRequest: number
+): SessionAuthContext {
+  const autonomous = stampAutonomous(auth, pullRequest);
+  return {
+    ...autonomous,
+    attributes: { ...autonomous.attributes, [SCOPE_ATTRIBUTE]: SUMMARY_SCOPE },
+  };
+}
+
+/** Whether the session is a summary-only run (see {@link stampSummary}). */
+export function isSummaryOnly(auth: SessionAuthContext | null): boolean {
+  return (
+    isAutonomous(auth) && auth?.attributes[SCOPE_ATTRIBUTE] === SUMMARY_SCOPE
+  );
+}
+
+/**
+ * Auth attribute carrying the intake API ticket an unattended run was
+ * dispatched for.
+ */
+export const INTAKE_TICKET_ATTRIBUTE = "intakeTicket";
+
+/**
+ * Auth attribute recording which verified API caller submitted the ticket.
+ * Informational only: no policy reads it.
+ */
+export const INTAKE_CALLER_ATTRIBUTE = "intakeCaller";
+
+/**
+ * Builds the unattended factory principal for a ticket submitted through the
+ * intake API.
+ *
+ * @remarks
+ * The principal is constructed from the verified caller and the server-made
+ * ticket id alone. Nothing in the request body reaches it, so a ticket can't
+ * choose who its run acts as. It carries no intake issue number, which means
+ * the approval policies give it no thread to comment on: an API run can read
+ * the repository, apply labels, close or reopen an issue, and open a draft
+ * pull request, and nothing else.
+ *
+ * @param ticketId - The id the server made for the ticket.
+ * @param callerId - The verified API caller's principal id.
+ */
+export function autonomousForTicket(
+  ticketId: string,
+  callerId: string
+): SessionAuthContext {
+  return {
+    attributes: {
+      [INTAKE_CALLER_ATTRIBUTE]: callerId,
+      [INTAKE_TICKET_ATTRIBUTE]: ticketId,
+    },
+    authenticator: "intake",
+    principalId: AUTONOMOUS_PRINCIPAL,
+    principalType: "service",
+  };
+}
+
+/**
+ * The issue number an unattended run was dispatched from.
+ *
+ * @returns Null when the session is not an unattended run, or carries no
+ * valid issue number (an intake API ticket carries none).
  */
 export function intakeIssueNumber(
   auth: SessionAuthContext | null
@@ -95,9 +190,7 @@ export function intakeIssueNumber(
   return Number.isSafeInteger(issue) && issue > 0 ? issue : null;
 }
 
-/**
- * Whether the session runs unattended under {@link AUTONOMOUS_PRINCIPAL}.
- */
+/** Whether the session runs unattended under {@link AUTONOMOUS_PRINCIPAL}. */
 export function isAutonomous(auth: SessionAuthContext | null): boolean {
   return auth !== null && auth.principalId === AUTONOMOUS_PRINCIPAL;
 }
@@ -115,7 +208,8 @@ export function isTrusted(auth: SessionAuthContext | null): boolean {
 }
 
 /**
- * The app principal eve stamps on schedule-dispatched turns.
+ * Whether the session is the app principal eve stamps on
+ * schedule-dispatched turns.
  *
  * @remarks
  * No schedule ships in this template, but the approval policies already

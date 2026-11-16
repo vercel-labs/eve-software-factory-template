@@ -1,15 +1,22 @@
 import { defineWorkflowTool } from "eve/tools";
 import { z } from "zod";
+import { stationPolicy } from "../lib/github/approval.js";
+import { stationOutput } from "../lib/stations/result.js";
 import { RESEARCHER_OUTPUT_SCHEMA } from "../lib/stations/schemas.js";
 
 /**
  * Blocking wrapper the orchestrator calls to run the `researcher` station.
  *
  * @remarks
- * - `defineAgent` has no `outputSchema` anymore; `ctx.agent()` takes one per call.
- * - Named `run_researcher`, not `researcher`: the compiler rejects a tool and a local subagent with the same public name.
+ * Attaches the output schema per call, and throws when the station fails,
+ * is cancelled, or returns no data (`stationOutput` in
+ * `agent/lib/stations/result.ts`), so the orchestrator sees a tool error
+ * instead of an empty result. Named `run_researcher`, not `researcher`:
+ * the compiler rejects a tool and a local subagent with the same public
+ * name.
  */
 export default defineWorkflowTool({
+  approval: stationPolicy,
   description:
     "Research a topic on the open web for facts, statistics, primary sources, and links the " +
     "caller doesn't already have. Runs refined searches against reliable sources and returns " +
@@ -18,10 +25,11 @@ export default defineWorkflowTool({
     "passes the question and any known context in the message.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("researcher", {
-      message,
+    const response = await ctx.agent("researcher").send(message, {
       outputSchema: RESEARCHER_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    return stationOutput("researcher", await response.result());
   },
   inputSchema: z.object({
     message: z

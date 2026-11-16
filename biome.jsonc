@@ -5,10 +5,30 @@
     "rules": {
       "style": {
         // eve derives tool/connection/skill names from filenames, and this project
-        // uses snake_case (e.g. agent/tools/get_user_preferences.ts). Disable the
+        // uses snake_case (e.g. agent/tools/triage_work_item.ts). Disable the
         // kebab-case filename rule so those names aren't flagged.
         "useFilenamingConvention": "off"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      // Tests read better with their expectations inline: a regex next to the
+      // assertion that uses it, and fakes that are async because the interface
+      // they stand in for is. The cost these rules guard against is runtime
+      // cost, which a test file doesn't have.
+      "includes": ["tests/**"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "noAwaitInLoops": "off",
+            "useTopLevelRegex": "off"
+          },
+          "suspicious": {
+            "useAwait": "off"
+          }
+        }
+      }
+    }
+  ]
 }

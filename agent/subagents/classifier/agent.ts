@@ -2,9 +2,15 @@ import { defineAgent } from "eve";
 import { MODELS } from "../../lib/models.js";
 
 /**
- * Station 1: triage.
+ * The clarification station.
  *
  * @remarks
+ * Routine triage is not an agent turn: `triage_work_item` classifies a work
+ * item with a decision model in one call. The orchestrator falls back to
+ * this station when that says the item needs clarification (a decision
+ * model can pick an option but cannot write the questions to ask), or when
+ * triage itself is unavailable.
+ *
  * Runs on a fast, cheap model because classification is a shaping step, not
  * an analysis step. The station receives only text (the work item plus any
  * thread context the orchestrator packs into `message`) and returns the
@@ -12,10 +18,9 @@ import { MODELS } from "../../lib/models.js";
  * `needs_clarification` is the pipeline's stop signal; the orchestrator asks
  * the human instead of proceeding on guesses.
  *
- * `tool: false` hides the station from the orchestrator; it calls it through
- * the `run_classifier` workflow tool, which attaches the output schema.
- * The wrapper cannot share this name: the compiler rejects a tool and a local
- * subagent with the same public name, even with `tool: false`.
+ * `tool: false` hides the station from the orchestrator, which runs it
+ * through the `run_classifier` workflow tool
+ * (`agent/lib/stations/schemas.ts` says why the two names differ).
  */
 export default defineAgent({
   description:

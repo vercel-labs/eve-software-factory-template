@@ -5,22 +5,23 @@ import { MODELS } from "../../lib/models.js";
  * Fresh-context web-research subagent.
  *
  * @remarks
- * The root delegates here when a task needs an outside fact: a statistic, a competitor detail,
- * a primary-source link, or a claim to verify. The researcher runs in a fresh child session and
- * inherits none of the root's skills, connections, or tools — only the framework default harness,
- * whose `web_search` and `web_fetch` cover web research with no extra wiring. It works solely
- * from what the root packs into `message` plus what it fetches, so every claim must be grounded
- * in a real source: the root weaves in only cited `findings` and surfaces `gaps` to the user.
+ * The root delegates here when a task needs an outside fact: a statistic, a
+ * competitor detail, a primary-source link, or a claim to verify. The
+ * researcher runs in a fresh child session and inherits none of the root's
+ * skills, connections, or tools, only the framework default harness, whose
+ * `web_search` and `web_fetch` cover web research with no extra wiring. It
+ * works solely from what the root packs into `message` plus what it
+ * fetches, so every claim must be grounded in a real source: the root
+ * weaves in only cited `findings` and surfaces `gaps` to the user.
  *
- * `description` is what the root reads to decide when to delegate; the `run_researcher` tool
- * attaches the output schema that makes the findings a structured, cited result.
+ * `tool: false` hides the station from the orchestrator, which runs it
+ * through the `run_researcher` workflow tool
+ * (`agent/lib/stations/schemas.ts` says why the two names differ). That
+ * tool's description is what the root reads to decide when to delegate, and
+ * its output schema is what makes the findings a structured, cited result.
  *
- * @see The research methodology and output contract in this folder's `instructions.md`.
- *
- * `tool: false` hides the station from the orchestrator; it calls it through
- * the `run_researcher` workflow tool, which attaches the output schema.
- * The wrapper cannot share this name: the compiler rejects a tool and a local
- * subagent with the same public name, even with `tool: false`.
+ * @see The research methodology and output contract in this folder's
+ * `instructions.md`.
  */
 export default defineAgent({
   description:
