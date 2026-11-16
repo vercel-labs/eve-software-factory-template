@@ -201,11 +201,58 @@ const readBodyFile = async (
   return text;
 };
 
+export const BODY_FILE_CHANGED_COMMAND =
+  "The text in the --body-file would change what this command does, so it was not run. Pass the text with --body instead.";
+
+/** An invocation's words with every body's text blanked out. */
+const withoutBodyText = (invocation: GhInvocation): string[] => {
+  const words = [...invocation.args];
+  for (const body of invocation.bodies) {
+    if (body.span === 2) {
+      words[body.at + 1] = "";
+    } else {
+      words[body.at] = (words[body.at] ?? "").slice(
+        0,
+        (words[body.at] ?? "").indexOf("=") + 1
+      );
+    }
+  }
+  return words;
+};
+
+/**
+ * Whether a command with its body files read is the command that was
+ * approved: the same command and effect, and word for word the same apart
+ * from the body text.
+ *
+ * @param approved - The command as the approval policy read it, each
+ * `--body-file` an empty `--body`.
+ * @param resolved - The same command with the files' text in place.
+ */
+export const isApprovedCommand = (
+  approved: GhInvocation,
+  resolved: GhInvocation
+): boolean =>
+  resolved.command === approved.command &&
+  JSON.stringify(resolved.effect) === JSON.stringify(approved.effect) &&
+  resolved.bodies.length === approved.bodies.length &&
+  JSON.stringify(withoutBodyText(resolved)) ===
+    JSON.stringify(withoutBodyText(approved));
+
 /**
  * Parses one `gh` step against the allowlist, reading any `--body-file`
  * from the sandbox so the text becomes the invocation's body.
  *
- * @throws With the parser's reason when the step is not on the allowlist.
+ * @remarks
+ * The approval policy read this step before the file was, with an empty
+ * body in its place, and a file's text is whatever is in the checkout: a
+ * contributor's pull request can put anything there. So the step is parsed
+ * twice, as approved and with the text in, and runs only when the two are
+ * the same command ({@link isApprovedCommand}). Text can then fill a body
+ * and do nothing else.
+ *
+ * @throws With the parser's reason when the step is not on the allowlist,
+ * or {@link BODY_FILE_CHANGED_COMMAND} when the text changed the command.
  */
 const resolveStep = async (
   sandbox: LeaseSandbox,
@@ -215,16 +262,26 @@ const resolveStep = async (
   if ("reason" in inlined) {
     throw new Error(inlined.reason);
   }
+  const approved = parseGh(inlined.argv);
+  if (!approved.ok) {
+    throw new Error(approved.reason);
+  }
+  if (inlined.files.length === 0) {
+    return approved.invocation;
+  }
   const argv = [...inlined.argv];
   for (const file of inlined.files) {
     // biome-ignore lint/performance/noAwaitInLoops: a command has one body file, rarely two
     argv[file.at] = await readBodyFile(sandbox, file.path);
   }
-  const parsed = parseGh(argv);
-  if (!parsed.ok) {
-    throw new Error(parsed.reason);
+  const resolved = parseGh(argv);
+  if (!resolved.ok) {
+    throw new Error(resolved.reason);
   }
-  return parsed.invocation;
+  if (!isApprovedCommand(approved.invocation, resolved.invocation)) {
+    throw new Error(BODY_FILE_CHANGED_COMMAND);
+  }
+  return resolved.invocation;
 };
 
 /** Whether every step parses and only reads; unparseable steps count as no. */
@@ -237,6 +294,26 @@ const onlyReads = (steps: readonly GhStep[]): boolean =>
     const parsed = parseGh(inlined.argv);
     return parsed.ok && parsed.invocation.effect.kind === "read";
   });
+
+const STATION_GH_READS_ONLY = "This agent only runs read-only gh commands.";
+
+/**
+ * Why a station's `gh` list is not run by the runtime: the first step's own
+ * refusal when one does not parse, else that stations only read.
+ */
+const stationRefusal = (steps: readonly GhStep[]): string => {
+  for (const step of steps) {
+    const inlined = inlineBodyFiles(step.argv);
+    if ("reason" in inlined) {
+      return inlined.reason;
+    }
+    const parsed = parseGh(inlined.argv);
+    if (!parsed.ok) {
+      return parsed.reason;
+    }
+  }
+  return STATION_GH_READS_ONLY;
+};
 
 /**
  * Validates one `gh` step and runs it under the lease its effect calls for.
@@ -252,7 +329,7 @@ const runGhStep = async (
   const invocation = await resolveStep(sandbox, step);
   const { effect } = invocation;
   if (role !== "orchestrator" && effect.kind !== "read") {
-    throw new Error("This agent only runs read-only gh commands.");
+    throw new Error(STATION_GH_READS_ONLY);
   }
   if (effect.kind === "state") {
     await assertIsIssue(sandbox, effect.commentThread, lease);
@@ -276,8 +353,15 @@ const runGhStep = async (
  * so the agent still sees what the earlier steps did and does not repeat a
  * comment that was already posted.
  *
+ * Only the orchestrator's lists run here. A station's reads run in its
+ * shell under the strict read-only lease, and it has no writes, so a
+ * station's list is refused before any step runs: a read ahead of a write
+ * in one list must not be run by the runtime, whose lease may be on a wider
+ * token (`FACTORY_TOKEN_FALLBACK`) in a sandbox the station controls.
+ *
  * @returns The steps' output joined in order, with the exit code of the
  * last step that ran.
+ * @throws For a station, with the reason from `stationRefusal`.
  */
 const runGhSteps = async (
   sandbox: LeaseSandbox,
@@ -287,6 +371,9 @@ const runGhSteps = async (
 ): Promise<BashToolOutput> => {
   if (steps.length > MAX_GH_STEPS) {
     throw new Error(`Run at most ${MAX_GH_STEPS} gh commands in one command.`);
+  }
+  if (role !== "orchestrator") {
+    throw new Error(stationRefusal(steps));
   }
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -372,7 +459,7 @@ const runPush = async (
 };
 
 export const WHOLE_COMMANDS_ONLY =
-  "No read-only GitHub credential is available here, so gh and git reach GitHub only as a whole command: one or more gh commands joined with &&, or git fetch origin <branch>, with every argument written out and no pipes, variables, or redirects.";
+  "No read-only GitHub credential is available here, so gh cannot be used in this sandbox, and git reaches GitHub only as a whole command: git fetch origin <branch>, with every argument written out and no pipes, variables, or redirects. If the work needs something from GitHub that the task did not give you, say what in your structured output.";
 
 /**
  * Runs a read without a shell, for a deployment whose GitHub App cannot
@@ -382,9 +469,15 @@ export const WHOLE_COMMANDS_ONLY =
  * A shell command is never given a token wider than read-only, whatever
  * `FACTORY_TOKEN_FALLBACK` allows (`withShellLease` in `lease.ts`), so when
  * that token can't be minted the command can't run in the shell. What the
- * runtime can still do is run a read it parsed itself: a list of `gh`
- * reads, or one `git fetch`. Those go through the validated runners, which
- * do follow the fallback setting.
+ * runtime can still do is run one `git fetch` it parsed itself: the lease
+ * for it follows the fallback setting, and is held to fetching the factory
+ * repository at the firewall (`FETCH_PATH` in `lease.ts`), so the wider
+ * token behind it can do nothing else from this sandbox.
+ *
+ * `gh` is not run here at all. Its reads and its writes are the same kind
+ * of request to the firewall, so a `gh` read under a wider token would put
+ * a credential that can write within reach of everything else running in
+ * the station's sandbox.
  *
  * @param cause - The `NarrowTokenError` that ruled the shell out.
  * @throws With {@link WHOLE_COMMANDS_ONLY} for any other command.
@@ -392,14 +485,10 @@ export const WHOLE_COMMANDS_ONLY =
 const runWithoutShell = async (
   sandbox: LeaseSandbox,
   command: string,
-  analysis: ShellAnalysis,
   role: ShellRole,
   lease: LeaseDependencies | undefined,
   cause: unknown
 ): Promise<BashToolOutput> => {
-  if (analysis.kind === "gh") {
-    return await runGhSteps(sandbox, analysis.steps, role, lease);
-  }
   const fetch = lexGitFetch(command);
   if (fetch && role !== "orchestrator" && isRepoDirectory(fetch.directory)) {
     const parsed = parseGitFetch(fetch.args);
@@ -501,7 +590,6 @@ export const bashTool = (options: {
         return await runWithoutShell(
           sandbox,
           input.command,
-          analysis,
           role,
           lease,
           error

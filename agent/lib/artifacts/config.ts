@@ -12,14 +12,12 @@ import { ARTIFACTS_PREFIX } from "../blob.js";
  * refusing anything that could escape the reserved prefix.
  *
  * Ids are model-supplied on read, which is why {@link ARTIFACT_ID_PATTERN}
- * is strict rather than forgiving. Without it a caller could pass
- * `../factory-brain/<hash>.md` and read a managed document through a tool
- * that was never meant to reach one.
+ * is strict rather than forgiving. Without it a caller could pass an id
+ * with dots or slashes in it and read a document outside the artifacts
+ * prefix through a tool that was never meant to reach one.
  *
- * The `artifacts/` prefix and its guards come from the reserved-namespace
- * registry in `../blob.js`, which keeps any general-purpose Blob tool from
- * reaching a handoff document; this module keeps the namespace reachable
- * only by a validated id.
+ * The `artifacts/` prefix comes from `../blob.js`; this module keeps it
+ * reachable only by a validated id.
  */
 
 /**

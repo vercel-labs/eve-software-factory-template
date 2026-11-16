@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { parseGh, RUNNER_PATH } from "#lib/github/cli.js";
 import { parseGitFetch, pushCommandLine } from "#lib/github/git-cli.js";
 import {
+  FETCH_PATH,
+  fetchPathFor,
   GH_TIMEOUT_MS,
   GIT_TIMEOUT_MS,
   LEASE_RESET_ATTEMPTS,
@@ -1996,5 +1998,164 @@ describe("token scopes: failures and fallbacks", () => {
     installation.grantsChecks = false;
     expect(await mintScopedToken("repo-read", { mint })).toBe(TOKEN);
     expect(requests.at(-1)).toEqual(TOKEN_SCOPES["repo-read"].required);
+  });
+});
+
+/**
+ * A read that had to take a wider token (`FACTORY_TOKEN_FALLBACK`) may run
+ * in a station's sandbox, where the placeholder can be read by whatever
+ * else is running. The firewall then attaches the token only to the
+ * requests a fetch of the factory repository makes.
+ */
+describe("a read lease that took a wider token is held to fetching at the firewall", () => {
+  /** An app that issues its full permissions and refuses every narrower set. */
+  const wideOnly: TokenMinter = async (permissions) => {
+    if (permissions !== null) {
+      throw new Error("422: cannot narrow");
+    }
+    return TOKEN;
+  };
+
+  const gitRules = (policy: unknown) =>
+    Object.entries(
+      (policy as { allow: Record<string, { match?: { path?: unknown } }[]> })
+        .allow
+    ).filter(
+      ([host]) => host === "github.com" || host === "codeload.github.com"
+    );
+
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  test("FETCH_PATH matches the two requests a fetch makes, on the factory repository, and no others", () => {
+    const path = new RegExp(FETCH_PATH);
+    for (const allowed of [
+      "/acme/widgets.git/info/refs",
+      "/acme/widgets.git/info/refs?service=git-upload-pack",
+      "/acme/widgets.git/git-upload-pack",
+      "/acme/widgets/info/refs",
+      "acme/widgets.git/git-upload-pack",
+    ]) {
+      expect(path.test(allowed), allowed).toBe(true);
+    }
+    for (const refused of [
+      "/acme/widgets.git/git-receive-pack",
+      "/acme/widgets.git/info/lfs/objects/batch",
+      "/acme/other.git/git-upload-pack",
+      "/evil/widgets.git/git-upload-pack",
+      "/acme/widgets.git.evil/git-upload-pack",
+      "/acme/widgetsX.git/git-upload-pack",
+      "/x/acme/widgets.git/git-upload-pack",
+      "/acme/widgets.git/git-upload-pack/../git-receive-pack",
+      "/acme/widgets.git/",
+      "/repos/acme/widgets/git/refs",
+    ]) {
+      expect(path.test(refused), refused).toBe(false);
+    }
+  });
+
+  test("a repository name is matched literally: its dots and other pattern characters mean nothing", () => {
+    expect(FETCH_PATH).toBe(fetchPathFor("acme", "widgets"));
+    const path = new RegExp(fetchPathFor("acme-co", "wid.gets+v2"));
+    expect(path.test("/acme-co/wid.gets+v2.git/git-upload-pack")).toBe(true);
+    expect(path.test("/acme-co/wid.gets+v2/info/refs")).toBe(true);
+    for (const refused of [
+      "/acme-co/widXgets+v2.git/git-upload-pack",
+      "/acme-co/wid.getsssv2.git/git-upload-pack",
+      "/acme-co/wid.gets+v2.git/git-receive-pack",
+    ]) {
+      expect(path.test(refused), refused).toBe(false);
+    }
+  });
+
+  test.each(["repository", "installation"])(
+    "FACTORY_TOKEN_FALLBACK=%s: a clone or fetch on the wider token gets the path rule on both git hosts",
+    async (setting) => {
+      vi.stubEnv("FACTORY_TOKEN_FALLBACK", setting);
+      const { sandbox, steps } = fakeSandbox();
+      await runLeasedGitCommand(sandbox, "/usr/bin/git fetch", {
+        id: () => "wide",
+        installationToken: async () => TOKEN,
+        mint: wideOnly,
+      });
+      const [first] = steps;
+      if (first?.kind !== "policy") {
+        throw new Error("expected the lease to be attached first");
+      }
+      expect(first.policy).toEqual(
+        leasePolicy("git", TOKEN, "factory-wide", { fetchOnly: true })
+      );
+      const rules = gitRules(first.policy);
+      expect(rules.map(([host]) => host).sort()).toEqual([
+        "codeload.github.com",
+        "github.com",
+      ]);
+      for (const [, hostRules] of rules) {
+        expect(hostRules).toHaveLength(1);
+        expect(hostRules[0]?.match?.path).toEqual({ regex: FETCH_PATH });
+      }
+    }
+  );
+
+  test("the wider token remembered from an earlier lease is held the same way", async () => {
+    vi.stubEnv("FACTORY_TOKEN_FALLBACK", "repository");
+    const { sandbox, steps } = fakeSandbox();
+    const dependencies = { id: () => "wide", mint: wideOnly };
+    await runLeasedGitCommand(sandbox, "/usr/bin/git fetch", dependencies);
+    await runGitFetch(sandbox, "/usr/bin/git fetch", dependencies);
+    const attached = steps.flatMap((step) =>
+      step.kind === "policy" && step.policy !== "allow-all" ? [step.policy] : []
+    );
+    expect(attached).toHaveLength(2);
+    for (const policy of attached) {
+      expect(policy).toEqual(
+        leasePolicy("git", TOKEN, "factory-wide", { fetchOnly: true })
+      );
+    }
+  });
+
+  test("a read lease on a token within its scope has no path rule: the token itself can only read", async () => {
+    const { sandbox, steps } = fakeSandbox();
+    await runLeasedGitCommand(sandbox, "/usr/bin/git fetch", {
+      id: () => "narrow",
+      mint: async () => TOKEN,
+    });
+    const [first] = steps;
+    expect(first).toEqual({
+      kind: "policy",
+      policy: leasePolicy("git", TOKEN, "factory-narrow"),
+    });
+    expect(JSON.stringify(first)).not.toContain("git-upload-pack");
+  });
+
+  test("the path rule is the only difference a fetch-only lease makes", () => {
+    const plain = leasePolicy("git", TOKEN, "p") as unknown as {
+      allow: Record<string, { match: object }[]>;
+    };
+    const held = leasePolicy("git", TOKEN, "p", {
+      fetchOnly: true,
+    }) as unknown as {
+      allow: Record<string, { match: { path?: unknown } }[]>;
+    };
+    expect(Object.keys(held.allow)).toEqual(Object.keys(plain.allow));
+    for (const host of ["github.com", "codeload.github.com"]) {
+      const { path, ...rest } = held.allow[host]?.[0]?.match ?? {};
+      expect(path).toEqual({ regex: FETCH_PATH });
+      expect(rest).toEqual(plain.allow[host]?.[0]?.match);
+    }
+  });
+
+  test("a push on a wider token is not a read, and is not held to fetching", async () => {
+    vi.stubEnv("FACTORY_TOKEN_FALLBACK", "repository");
+    const { sandbox, steps } = fakeSandbox();
+    await runGitPush(sandbox, "factory/x", {
+      id: () => "wide",
+      mint: wideOnly,
+    });
+    expect(steps[0]).toEqual({
+      kind: "policy",
+      policy: leasePolicy("git", TOKEN, "factory-wide"),
+    });
   });
 });
