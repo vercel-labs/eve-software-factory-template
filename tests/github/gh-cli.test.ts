@@ -1427,3 +1427,138 @@ describe("parseGh: what the adversarial review found", () => {
     });
   });
 });
+
+/**
+ * `-R/--repo` is removed where it is a flag, and only there. Text that reads
+ * like the flag but is another flag's value (a body, a title) stays that
+ * value: taking it for the flag would hand the next word to the flag before
+ * it, and a `--body` followed by `--draft` would swallow the `--draft`.
+ */
+describe("parseGh: the repository flag is a flag only where a flag can be", () => {
+  const parsed = (argv: string[]) => {
+    const result = parseGh(argv);
+    if (!result.ok) {
+      throw new Error(result.reason);
+    }
+    return result.invocation;
+  };
+
+  const PR = ["pr", "create", "--head", "factory/x", "--base", "main"];
+
+  test.each([
+    "--repo=acme/widgets",
+    "--repo=https://github.com/acme/widgets.git",
+    "--repo=evil/other",
+    "--repo",
+    "-R",
+  ])(
+    "a body that reads %j is the body, and the draft stays a draft",
+    (text) => {
+      const invocation = parsed([
+        ...PR,
+        "--title",
+        "t",
+        "--body",
+        text,
+        "--draft",
+      ]);
+      expect(invocation.effect).toEqual({ kind: "draft-pr" });
+      expect(invocation.bodies.map((body) => body.content)).toEqual([text]);
+      expect(invocation.args).toEqual([
+        ...PR,
+        "--title",
+        "t",
+        "--body",
+        text,
+        "--draft",
+      ]);
+    }
+  );
+
+  test("a title that reads like the flag is the title", () => {
+    const invocation = parsed([
+      ...PR,
+      "--title",
+      "-R",
+      "--body",
+      "b",
+      "--draft",
+    ]);
+    expect(invocation.effect).toEqual({ kind: "draft-pr" });
+    expect(invocation.args).toContain("-R");
+  });
+
+  test("a comment body that reads like the flag does not swallow the flag after it", () => {
+    const invocation = parsed([
+      "issue",
+      "comment",
+      "12",
+      "--body",
+      "--repo=acme/widgets",
+      "--edit-last",
+    ]);
+    expect(invocation.bodies.map((body) => body.content)).toEqual([
+      "--repo=acme/widgets",
+    ]);
+    expect(invocation.args).toEqual([
+      "issue",
+      "comment",
+      "12",
+      "--body",
+      "--repo=acme/widgets",
+      "--edit-last",
+    ]);
+  });
+
+  test.each([
+    [["-R", "acme/widgets", "issue", "view", "12"]],
+    [["issue", "-R", "acme/widgets", "view", "12"]],
+    [["issue", "view", "--repo=acme/widgets", "12"]],
+    [["issue", "view", "12", "--repo", "acme/widgets"]],
+    [["issue", "view", "12", "-R", "https://github.com/acme/widgets"]],
+  ])(
+    "%j: the flag itself is still checked and removed, wherever it sits",
+    (argv) => {
+      expect(parsed(argv).args).toEqual(["issue", "view", "12"]);
+    }
+  );
+
+  test.each([
+    [["-R", "evil/other", "issue", "view", "12"]],
+    [["issue", "--repo=evil/other", "view", "12"]],
+    [["issue", "view", "12", "-R", "evil/other"]],
+    [["issue", "view", "12", "--repo=evil/other"]],
+    [["issue", "view", "12", "-R"]],
+    [[...PR, "--title", "t", "--body", "b", "--draft", "-R", "evil/other"]],
+  ])(
+    "%j: the flag naming another repository, or none, is still refused",
+    (argv) => {
+      const result = parseGh(argv);
+      expect(result.ok).toBe(false);
+      expect(result.ok ? "" : result.reason).toBe(
+        "This factory only works on acme/widgets."
+      );
+    }
+  );
+
+  test("the flag after a body is removed, and the body's position still points at the body", () => {
+    const invocation = parsed([
+      "issue",
+      "comment",
+      "-R",
+      "acme/widgets",
+      "12",
+      "--body",
+      "hello",
+      "--repo=acme/widgets",
+    ]);
+    expect(invocation.args).toEqual([
+      "issue",
+      "comment",
+      "12",
+      "--body",
+      "hello",
+    ]);
+    expect(invocation.bodies).toEqual([{ at: 3, content: "hello", span: 2 }]);
+  });
+});

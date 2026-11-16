@@ -675,32 +675,71 @@ const isFactoryRepoValue = (value: string): boolean => {
   return rest.length === 0 && sameRepo(owner, name.replace(GIT_SUFFIX, ""));
 };
 
+const REPO_REFUSAL = `This factory only works on ${FACTORY_REPO}.`;
+
 /**
- * Removes `-R/--repo` after checking it names the factory repository. The
- * runner pins the repository through the environment instead, so the flag is
- * never what decides where a command lands.
+ * Reads a `-R/--repo` flag at `args[index]`.
+ *
+ * @returns How many arguments the flag takes up, 0 when `args[index]` is not
+ * a repository flag, or the refusal when it names another repository.
  */
-const stripRepoFlag = (
+const readRepoFlag = (
+  args: readonly string[],
+  index: number
+): 0 | 1 | 2 | { reason: string } => {
+  const arg = args[index] ?? "";
+  let value: string | undefined;
+  let span: 1 | 2;
+  if (REPO_FLAGS.has(arg)) {
+    value = args[index + 1];
+    span = 2;
+  } else if (arg.startsWith("--repo=")) {
+    value = arg.slice("--repo=".length);
+    span = 1;
+  } else {
+    return 0;
+  }
+  return value === undefined || !isFactoryRepoValue(value)
+    ? { reason: REPO_REFUSAL }
+    : span;
+};
+
+/**
+ * Removes `-R/--repo` from the words before and between the command path,
+ * after checking it names the factory repository.
+ *
+ * @remarks
+ * `gh` accepts the flag anywhere, including ahead of the command
+ * (`gh -R owner/repo pr view 3`). No flag that takes a value can come before
+ * the command path is complete, so here a word that looks like the flag is
+ * the flag. The scan stops at the second plain word or at any other flag;
+ * what follows is read by {@link stripRepoFlagFromRest}, which knows the
+ * command's flags.
+ */
+const stripLeadingRepoFlag = (
   args: readonly string[]
 ): { args: string[] } | { reason: string } => {
   const kept: string[] = [];
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index] ?? "";
-    let value: string | undefined;
-    if (REPO_FLAGS.has(arg)) {
-      value = args[index + 1];
-      index += 1;
-    } else if (arg.startsWith("--repo=")) {
-      value = arg.slice("--repo=".length);
-    } else {
-      kept.push(arg);
+  let words = 0;
+  let index = 0;
+  while (index < args.length && words < 2) {
+    const span = readRepoFlag(args, index);
+    if (typeof span === "object") {
+      return span;
+    }
+    if (span > 0) {
+      index += span;
       continue;
     }
-    if (value === undefined || !isFactoryRepoValue(value)) {
-      return { reason: `This factory only works on ${FACTORY_REPO}.` };
+    const arg = args[index] ?? "";
+    if (arg.startsWith("-")) {
+      break;
     }
+    kept.push(arg);
+    words += 1;
+    index += 1;
   }
-  return { args: kept };
+  return { args: [...kept, ...args.slice(index)] };
 };
 
 interface FlagToken {
@@ -820,6 +859,51 @@ const readFlag = (
   };
 };
 
+/**
+ * Removes `-R/--repo` from the arguments after the command path, after
+ * checking it names the factory repository. The runner pins the repository
+ * through the environment instead, so the flag never decides where a
+ * command lands.
+ *
+ * @remarks
+ * The scan knows which of the command's flags take a value and steps over
+ * each value unread. Without that, text that happens to read `--repo=...`
+ * (a comment body, a title) would be taken for the flag and removed, and
+ * the flag before it would take the next word as its value instead: a
+ * `--body` followed by `--draft` would swallow the `--draft`.
+ */
+const stripRepoFlagFromRest = (
+  table: FlagTable,
+  rest: readonly string[]
+): { rest: string[] } | { reason: string } => {
+  const kept: string[] = [];
+  let index = 0;
+  while (index < rest.length) {
+    const arg = rest[index] ?? "";
+    const span = readRepoFlag(rest, index);
+    if (typeof span === "object") {
+      return span;
+    }
+    if (span > 0) {
+      index += span;
+      continue;
+    }
+    kept.push(arg);
+    index += 1;
+    const token =
+      arg.startsWith("-") && arg !== "-" && arg !== "--"
+        ? readFlagToken(arg, table)
+        : null;
+    const read =
+      token === null ? null : readFlagValue(token, table, rest[index]);
+    if (read !== null && typeof read === "object" && read.consumed === 1) {
+      kept.push(rest[index] ?? "");
+      index += 1;
+    }
+  }
+  return { rest: kept };
+};
+
 const parseFlags = (
   command: string,
   spec: CommandSpec,
@@ -899,11 +983,11 @@ export const parseGh = (argv: readonly string[]): GhParseResult => {
   if (shape) {
     return { ok: false, reason: shape };
   }
-  const stripped = stripRepoFlag(withoutBinary);
-  if ("reason" in stripped) {
-    return { ok: false, reason: stripped.reason };
+  const leading = stripLeadingRepoFlag(withoutBinary);
+  if ("reason" in leading) {
+    return { ok: false, reason: leading.reason };
   }
-  const [first = "", second = ""] = stripped.args;
+  const [first = "", second = ""] = leading.args;
   const pair = `${first} ${second}`;
   let command: string;
   if (Object.hasOwn(COMMANDS, pair)) {
@@ -918,7 +1002,17 @@ export const parseGh = (argv: readonly string[]): GhParseResult => {
   }
   const spec = COMMANDS[command] as CommandSpec;
   const commandLength = command.split(" ").length;
-  const parsed = parseFlags(command, spec, stripped.args.slice(commandLength));
+  const rest = stripRepoFlagFromRest(
+    flagTable(spec),
+    leading.args.slice(commandLength)
+  );
+  if ("reason" in rest) {
+    return { ok: false, reason: rest.reason };
+  }
+  const stripped = {
+    args: [...leading.args.slice(0, commandLength), ...rest.rest],
+  };
+  const parsed = parseFlags(command, spec, rest.rest);
   if (typeof parsed === "string") {
     return { ok: false, reason: parsed };
   }

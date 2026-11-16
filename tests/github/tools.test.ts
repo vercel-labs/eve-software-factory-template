@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { type BashToolInput, type BashToolOutput, bash } from "eve/tools/bash";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { GH_ONLY, MAX_GH_STEPS } from "#lib/github/approval.js";
-import { MAX_GH_ARG_LENGTH, shellQuote } from "#lib/github/cli.js";
+import { MAX_GH_ARG_LENGTH, parseGh, shellQuote } from "#lib/github/cli.js";
 import {
   CURRENT_BRANCH_COMMAND,
   parseGitFetch,
@@ -10,6 +10,7 @@ import {
   rewriteGuard,
 } from "#lib/github/git-cli.js";
 import {
+  FETCH_PATH,
   type LeaseDependencies,
   type LeaseSandbox,
   leasePolicy,
@@ -22,7 +23,9 @@ import {
 import { analyzeCommand, MAX_ANALYZED_LENGTH } from "#lib/github/shell.js";
 import type { ShellRole } from "#lib/github/shims.js";
 import {
+  BODY_FILE_CHANGED_COMMAND,
   bashTool,
+  isApprovedCommand,
   leaseExports,
   WHOLE_COMMANDS_ONLY,
 } from "#lib/github/tools.js";
@@ -477,7 +480,8 @@ describe.each(STATIONS)("%s: when no read-only token can be minted", (role) => {
 
   test("the refusal says what to write instead", () => {
     expect(WHOLE_COMMANDS_ONLY).toMatch(/No read-only GitHub credential/);
-    expect(WHOLE_COMMANDS_ONLY).toContain("gh commands joined with &&");
+    expect(WHOLE_COMMANDS_ONLY).toContain("gh cannot be used in this sandbox");
+    expect(WHOLE_COMMANDS_ONLY).not.toContain("gh commands joined");
     expect(WHOLE_COMMANDS_ONLY).toContain("git fetch origin <branch>");
     expect(WHOLE_COMMANDS_ONLY).not.toContain("—");
   });
@@ -490,12 +494,13 @@ describe.each(STATIONS)("%s: when no read-only token can be minted", (role) => {
     ]);
   });
 
-  test("a list of gh reads fails with the minting error, and nothing runs", async () => {
+  test("a list of gh reads is refused the same way, and nothing runs", async () => {
     const h = refused();
     await expect(
       h.tool(role).execute({ command: "gh issue view 12 && gh pr list" }, h.ctx)
-    ).rejects.toThrow(/Could not mint a GitHub token for scope "repo-read"/);
+    ).rejects.toThrow(WHOLE_COMMANDS_ONLY);
     expect(h.kinds().filter((kind) => kind !== "mint")).toEqual([]);
+    expect(h.minted()).toEqual([READ, TOKEN_SCOPES["repo-read"].required]);
   });
 
   describe("and FACTORY_TOKEN_FALLBACK allows a wider one", () => {
@@ -534,7 +539,7 @@ describe.each(STATIONS)("%s: when no read-only token can be minted", (role) => {
     test("it stays that way once the runner has taken the wider token for a read of its own", async () => {
       const h = wideOnly();
       const tool = h.tool(role);
-      await tool.execute({ command: "gh issue view 12" }, h.ctx);
+      await tool.execute({ command: "git fetch origin main" }, h.ctx);
       expect(h.minted().at(-1)).toBeNull();
       const before = h.events.length;
       for (const command of [
@@ -551,33 +556,47 @@ describe.each(STATIONS)("%s: when no read-only token can be minted", (role) => {
       expect(h.events.slice(before)).toEqual([]);
     });
 
-    test("a list of gh reads is run by the runtime, one validated command at a time", async () => {
-      const h = wideOnly();
-      const result = await h
-        .tool(role)
-        .execute(
-          { command: "gh issue view 12 --json title && gh pr list" },
-          h.ctx
+    // A read ahead of a write is one list the shell is not given, so it is
+    // the runner's to refuse. Called past the approval policy, which denies
+    // it first: the tool has to hold without it.
+    test.each([
+      'gh issue view 12 && gh issue comment 12 --body "x"',
+      "gh pr list; gh issue close 12",
+      "gh issue view 12 && gh pr view 34 && gh issue edit 12 --add-label bug",
+    ])(
+      "%s: the read ahead of the write is not run on the wider token either",
+      async (command) => {
+        const h = wideOnly();
+        await expect(h.tool(role).execute({ command }, h.ctx)).rejects.toThrow(
+          /only runs read-only gh commands/
         );
-      expect(result.status).toBe("completed");
-      expect(h.shellCommands()).toEqual([]);
-      expect(h.commands()).toEqual([
-        "/usr/bin/gh 'issue' 'view' '12' '--json' 'title'",
-        "/usr/bin/gh 'pr' 'list'",
-      ]);
-      expect(h.of("policy").map((event) => event.policy)).toEqual([
-        leasePolicy("gh", TOKEN, PLACEHOLDER),
-        "allow-all",
-        leasePolicy("gh", TOKEN, PLACEHOLDER),
-        "allow-all",
-      ]);
-      for (const run of h.of("run")) {
-        expect(run.env).toMatchObject({
-          GH_TOKEN: PLACEHOLDER,
-          PATH: "/usr/bin:/bin",
-        });
+        expect(h.events).toEqual([]);
       }
-    });
+    );
+
+    // gh's reads and its writes are the same kind of request to the
+    // firewall, so a wider token behind gh could write from this sandbox.
+    test.each([
+      "gh issue view 12",
+      "gh issue view 12 --json title && gh pr list",
+      "gh pr diff 34",
+      "gh run view 991 --log-failed",
+      "gh api repos/{owner}/{repo}/pulls/34",
+    ])(
+      "%s is refused: the wider token is never put behind gh in a station's sandbox",
+      async (command) => {
+        const h = wideOnly();
+        await expect(h.tool(role).execute({ command }, h.ctx)).rejects.toThrow(
+          WHOLE_COMMANDS_ONLY
+        );
+        expect(h.shellCommands()).toEqual([]);
+        expect(h.commands()).toEqual([]);
+        expect(h.of("policy")).toEqual([]);
+        // The wide token was not even asked for.
+        expect(h.minted().length).toBeGreaterThan(0);
+        expect(h.minted()).not.toContain(null);
+      }
+    );
 
     test.each<[string, string]>([
       ["git fetch origin factory/x", fetchOf("origin", "factory/x")],
@@ -609,10 +628,16 @@ describe.each(STATIONS)("%s: when no read-only token can be minted", (role) => {
         expect(expected.slice(GUARD.length)).toContain(
           " 'https://github.com/acme/widgets.git' '+refs/heads/"
         );
+        // The lease took the wider token, so the firewall attaches it to a
+        // fetch of the factory repository and to nothing else.
+        expect(h.minted().at(-1)).toBeNull();
         expect(h.of("policy").map((event) => event.policy)).toEqual([
-          leasePolicy("git", TOKEN, PLACEHOLDER),
+          leasePolicy("git", TOKEN, PLACEHOLDER, { fetchOnly: true }),
           "allow-all",
         ]);
+        expect(JSON.stringify(h.of("policy")[0]?.policy)).toContain(
+          JSON.stringify({ regex: FETCH_PATH })
+        );
         const [run] = h.of("run");
         expect(run?.env).toMatchObject({
           GIT_CONFIG_KEY_1: "core.hooksPath",
@@ -2257,17 +2282,9 @@ describe.each(STATIONS)("%s: a gh command that changes GitHub", (role) => {
           /only runs read-only gh commands/
         );
       }
-      // No token, no policy, no shell. The one thing the runtime ran is the
-      // read of a body file, which holds no credential.
-      expect(h.events).toEqual(
-        command.includes("--body-file")
-          ? CALLER_CLASSES.map(() => ({
-              command: `${HEAD}'notes.md'`,
-              env: undefined,
-              kind: "run",
-            }))
-          : []
-      );
+      // No token, no policy, no shell, and no body file read: a station's
+      // list is refused before the runtime runs anything for it.
+      expect(h.events).toEqual([]);
     }
   );
 
@@ -3283,5 +3300,91 @@ describe("each agent mounts the tool with its own role", () => {
       "not-applicable"
     );
     expect(outcome(decide("gh pr merge 34"))).toBe("denied");
+  });
+});
+
+/**
+ * A body file is read after the approval policy has judged the command, and
+ * its text is whatever is in the checkout: a contributor's pull request can
+ * put anything there. The text may fill the body and do nothing else.
+ */
+describe("the orchestrator: a body file's text cannot change what the command does", () => {
+  const DRAFT =
+    "gh pr create --head factory/x --base main --title t --body-file notes.md --draft";
+
+  test.each([
+    "--repo=acme/widgets",
+    "--repo=https://github.com/acme/widgets.git",
+    "--repo=evil/other",
+    "-R",
+    "--draft",
+    "--title",
+  ])(
+    "a file that holds %j becomes the body of a draft, for an unattended run too",
+    async (text) => {
+      for (const caller of ["autonomous", "trusted"] as const) {
+        const h = harness({ files: { "notes.md": text } });
+        const tool = h.tool("orchestrator");
+        // The policy reads the command before the file is read: a draft runs.
+        expect(
+          outcome(
+            tool.approval(approvalContext(CALLERS[caller], { command: DRAFT }))
+          )
+        ).toBe("not-applicable");
+        await tool.execute({ command: DRAFT }, h.as(caller));
+        expect(h.of("write").map((write) => write.content)).toEqual([text]);
+        const ran =
+          h
+            .of("run")
+            .map((run) => run.command)
+            .at(-1) ?? "";
+        expect(ran).toContain("'pr' 'create'");
+        expect(ran).toContain("'--draft'");
+        expect(ran).toMatch(/'--body-file' '[^']+' '--draft'; status=/);
+      }
+    }
+  );
+
+  const invocationOf = (...argv: string[]) => {
+    const parsed = parseGh(argv);
+    if (!parsed.ok) {
+      throw new Error(parsed.reason);
+    }
+    return parsed.invocation;
+  };
+  const PR = [
+    "pr",
+    "create",
+    "--head",
+    "factory/x",
+    "--base",
+    "main",
+    "--title",
+    "t",
+  ];
+  const approved = invocationOf(...PR, "--body", "", "--draft");
+
+  test("the same command with the text in is the approved command", () => {
+    expect(
+      isApprovedCommand(
+        approved,
+        invocationOf(...PR, "--body", "anything", "--draft")
+      )
+    ).toBe(true);
+  });
+
+  test.each([
+    ["no longer a draft", [...PR, "--body", "x"]],
+    ["a flag more", [...PR, "--body", "x", "--draft", "--label", "bug"]],
+    ["another title", [...PR.slice(0, -1), "other", "--body", "x", "--draft"]],
+    ["written with the body glued to its flag", [...PR, "--body=x", "--draft"]],
+    ["another command", ["issue", "comment", "12", "--body", "x"]],
+  ])("a command that is %s is not the approved command", (_name, argv) => {
+    expect(isApprovedCommand(approved, invocationOf(...argv))).toBe(false);
+  });
+
+  test("the refusal says what to do instead", () => {
+    expect(BODY_FILE_CHANGED_COMMAND).toContain("--body instead");
+    expect(BODY_FILE_CHANGED_COMMAND).not.toMatch(/[\u2014\u2013]/);
   });
 });

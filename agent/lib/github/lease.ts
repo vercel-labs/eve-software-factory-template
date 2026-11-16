@@ -306,7 +306,27 @@ export const mintScopedToken = async (
   scope: TokenScope,
   dependencies: MintDependencies = {},
   options: MintOptions = {}
-): Promise<string> => {
+): Promise<string> => (await mintForLease(scope, dependencies, options)).token;
+
+/** A minted token, and whether it is wider than the scope asked for. */
+interface MintedToken {
+  readonly token: string;
+  /**
+   * True when the token came from a fallback rung: every permission the app
+   * holds, on the factory repository or on the whole installation.
+   */
+  readonly widened: boolean;
+}
+
+const isWide = (rung: Rung): boolean =>
+  rung === null || rung === "installation";
+
+/** {@link mintScopedToken}, also reporting whether the token was widened. */
+const mintForLease = async (
+  scope: TokenScope,
+  dependencies: MintDependencies = {},
+  options: MintOptions = {}
+): Promise<MintedToken> => {
   const strict = options.strict === true;
   const mint = dependencies.mint ?? connectMinter;
   const now = dependencies.now ?? Date.now;
@@ -337,11 +357,14 @@ export const mintScopedToken = async (
     }
     // A wide token that worked for a command the runtime ran says nothing a
     // strict caller can use, so only the scope's own rungs are walked.
-    return await mintStrict(scope, request, now);
+    return { token: await mintStrict(scope, request, now), widened: false };
   }
   if (remembered && remembered.expiresAt > now()) {
     try {
-      return await request(remembered.permissions);
+      return {
+        token: await request(remembered.permissions),
+        widened: isWide(remembered.permissions),
+      };
     } catch {
       // What worked before no longer does (a permission was removed, say).
       // Forget it and find out afresh what the installation grants.
@@ -369,7 +392,7 @@ export const mintScopedToken = async (
             : now() + SCOPE_DOWNGRADE_TTL_MS,
         permissions: rung,
       });
-      return token;
+      return { token, widened: isWide(rung) };
     } catch (error) {
       lastError = error;
     }
@@ -423,6 +446,30 @@ export const mintChannelToken = async (
 const basic = (secret: string): string =>
   `Basic ${Buffer.from(`x-access-token:${secret}`).toString("base64")}`;
 
+const escapeRegex = (text: string): string =>
+  text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * The only request paths a fetch-only lease attaches its credential to: the
+ * two a `git fetch` or `git clone` of one repository makes, as a pattern
+ * for the sandbox firewall.
+ *
+ * @remarks
+ * Git's HTTP transport reads with `info/refs` and `git-upload-pack` and
+ * writes with `git-receive-pack`. A lease held to these paths can fetch the
+ * factory repository and nothing else, whatever the token behind it could
+ * do. The optional query is allowed for a firewall that counts it as part
+ * of the path.
+ *
+ * @param owner - The repository owner, matched literally.
+ * @param repo - The repository name, matched literally.
+ */
+export const fetchPathFor = (owner: string, repo: string): string =>
+  `^/?${escapeRegex(owner)}/${escapeRegex(repo)}(?:\\.git)?/(?:info/refs|git-upload-pack)(?:\\?.*)?$`;
+
+/** {@link fetchPathFor} the factory repository. */
+export const FETCH_PATH = fetchPathFor(factoryRepo.owner, factoryRepo.repo);
+
 /**
  * Which hosts a lease attaches its credential to: `gh` the API hosts, `git`
  * the git hosts, `shell` both. A shell command may run either program, and
@@ -447,7 +494,8 @@ export type LeaseKind = "gh" | "git" | "shell";
 export const leasePolicy = (
   kind: LeaseKind,
   token: string,
-  placeholder: string
+  placeholder: string,
+  options: { readonly fetchOnly?: boolean } = {}
 ): SandboxNetworkPolicy => {
   const api: SandboxNetworkRule[] = [
     {
@@ -471,6 +519,7 @@ export const leasePolicy = (
             value: { exact: basic(placeholder) },
           },
         ],
+        ...(options.fetchOnly ? { path: { regex: FETCH_PATH } } : {}),
       },
       transform: [{ headers: { authorization: basic(token) } }],
     },
@@ -630,9 +679,17 @@ const withLease = (
 ): Promise<CliResult> =>
   serialized(sandbox.name, async () => {
     const placeholder = `factory-${(dependencies.id ?? randomUUID)()}`;
-    const token = await mintScopedToken(scope, dependencies);
+    const { token, widened } = await mintForLease(scope, dependencies);
     const leased = await build(placeholder);
-    await sandbox.setNetworkPolicy(leasePolicy(kind, token, placeholder));
+    await sandbox.setNetworkPolicy(
+      leasePolicy(kind, token, placeholder, {
+        // A read that had to take a wider token (`FACTORY_TOKEN_FALLBACK`)
+        // is held to reading at the firewall instead: the sandbox may be a
+        // station's, where the placeholder can be read by whatever else is
+        // running, and the token could write.
+        fetchOnly: kind === "git" && scope === "repo-read" && widened,
+      })
+    );
     try {
       const result = await sandbox.run({
         command: leased.command,
@@ -845,8 +902,11 @@ const runSignedPush = (
  * @remarks
  * Only for a deployment that cannot issue a read-only token, where a fetch
  * can't run in the agent's shell. Unlike the shell's lease, this one follows
- * `FACTORY_TOKEN_FALLBACK`, which is safe because the command is the
- * runtime's own: fixed remote, plain branch names, hooks off.
+ * `FACTORY_TOKEN_FALLBACK`. The command is the runtime's own (fixed remote,
+ * plain branch names, hooks off), but it runs in a station's sandbox, where
+ * the placeholder can be read by anything else running there. So a lease
+ * that took a wider token attaches it only to the requests a fetch of the
+ * factory repository makes ({@link FETCH_PATH}).
  *
  * @param commandLine - The `commandLine` of a successful `parseGitFetch`.
  */

@@ -24,7 +24,7 @@ import { BlobNotFoundError, del, get, head, put } from "@vercel/blob";
  * own: adding a namespace is a single edit in this file, and the guards can
  * only be complete if one module sees every prefix.
  *
- * The document helpers carry the store's shared posture (public access,
+ * The document helpers carry the store's shared posture (private access,
  * exact pathnames, Markdown) in one place. They stay neutral about errors:
  * API failures propagate, and each tool maps them to its own output shape.
  * Authorization resolves from the ambient Vercel OIDC credentials.
@@ -180,7 +180,7 @@ export const readDocument = async (
 ): Promise<
   { found: false } | { content: string; found: true; uploadedAt: string }
 > => {
-  const result = await get(key, { access: "public" });
+  const result = await get(key, { access: "private" });
   if (!result?.stream) {
     return { found: false };
   }
@@ -195,10 +195,10 @@ export const readDocument = async (
  * Write a Markdown document to the store at its exact key.
  *
  * @remarks
- * Carries the store's shared write posture: public access (the store is
- * provisioned public; unguessability comes from the suffixed keys the
- * feature modules derive), no random suffix (the key is the identity),
- * Markdown content type. Overwrite is the caller's decision: handoff
+ * Carries the store's shared write posture: private access (the store is
+ * provisioned private, so a document is read only with the project's
+ * credentials, never by its URL), no random suffix (the key is the
+ * identity), Markdown content type. Overwrite is the caller's decision: handoff
  * artifacts are write-once.
  *
  * @param key - The exact Blob pathname, derived by the owning feature module.
@@ -210,7 +210,7 @@ export const writeDocument = (
   options: { allowOverwrite: boolean }
 ) =>
   put(key, contents, {
-    access: "public",
+    access: "private",
     addRandomSuffix: false,
     allowOverwrite: options.allowOverwrite,
     contentType: "text/markdown",
