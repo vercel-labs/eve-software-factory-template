@@ -13,10 +13,9 @@ import { MODELS } from "../../lib/models.js";
  * ships a draft PR, request_changes loops back to the implementer (at most
  * twice), reject stops the line.
  *
- * `tool: false` hides the station from the orchestrator; it calls it through
- * the `run_reviewer` workflow tool, which attaches the output schema.
- * The wrapper cannot share this name: the compiler rejects a tool and a local
- * subagent with the same public name, even with `tool: false`.
+ * `tool: false` hides the station from the orchestrator, which runs it
+ * through the `run_reviewer` workflow tool
+ * (`agent/lib/stations/schemas.ts` says why the two names differ).
  */
 export default defineAgent({
   description:

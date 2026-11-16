@@ -3,16 +3,17 @@ description: "Grounding a GitHub work item before running the factory pipeline: 
 ---
 # Triaging Issues
 
-How to ground a GitHub issue before the factory pipeline runs on it, or when someone asks for a triage pass outright. The order matters: read, dedupe, label, then decide what the issue needs. Never comment on or change an issue you haven't read in full, including its existing comments and labels.
+How to ground a GitHub issue before the factory pipeline runs on it, or when someone asks for a triage pass outright. The order matters: read, dedupe, label, then decide what the issue needs. `triage_work_item` does the mechanical part of this in one call (classification, labels from the repo's vocabulary, a first duplicate search); this skill is the judgment around it. Never comment on or change an issue you haven't read in full, including its existing comments and labels.
 
 ## 1. Check for duplicates before anything else
 
 Running the pipeline on a duplicate wastes a full implementation cycle, and a duplicate comment on a fresh report saves everyone the most time, but only if you are right.
 
-- Search the repo's existing issues for the same symptom before doing anything. Search closed issues as well as open ones: many "new" bugs were already fixed or already rejected.
+- `triage_work_item` searches existing issues by the title's words and returns likely matches in `duplicates`. Those are candidates to read, not verdicts: open each one (`gh issue view 42 --comments`) before you call anything a duplicate.
+- When the symptom could be described in other words, search further yourself: `gh issue list --state all --search "<terms>"`. Search closed issues as well as open ones: many "new" bugs were already fixed or already rejected.
 - Search by the error message, the API or feature name, and a plain description of the symptom. One search is not enough; reporters describe the same bug in different words.
 - Treat it as a duplicate only when the underlying cause matches, not just the surface symptom. Two crashes with the same error text can have different roots.
-- When it is a duplicate of an open issue: comment linking the original by number, apply the repo's duplicate label if one exists, and note anything the new report adds (a new environment, a cleaner reproduction) on the original. Don't run the pipeline twice for one problem.
+- When it is a duplicate of an open issue: comment linking the original by number, apply the repo's duplicate label if one exists, and note anything the new report adds (a new environment, a cleaner reproduction) on the original. Don't run the pipeline twice for one problem. An unattended run can comment only on the thread it started from, so there it links the original from its own thread and leaves the note on the original to a person.
 - When it duplicates a closed issue that was fixed: point to the fix and the release that carries it, and ask the reporter to confirm on that version before closing.
 - When you are not sure, say so in your comment ("this looks related to #42") and leave both open rather than closing on a guess.
 
@@ -20,7 +21,7 @@ Running the pipeline on a duplicate wastes a full implementation cycle, and a du
 
 Every repo has its own label taxonomy, and an invented label is worse than none.
 
-- List the repo's existing labels first and work only from that set. Never create a label or apply a name you assume exists.
+- `triage_work_item` chooses from the repo's existing labels and applies them, so in the usual case there is nothing left to label. When you correct its choice by hand, list the labels first (`gh label list`) and work only from that set. Never create a label or apply a name you assume exists.
 - Read the label descriptions when they exist; "bug" versus "regression" versus "confirmed" often carry specific local meaning.
 - Apply the fewest labels that place the issue: usually one for type (bug, feature, question) and one for area or status when the repo has them.
 - Remove a label only when it is clearly wrong for the issue, and say why in a comment when the removal isn't obvious.
@@ -28,7 +29,7 @@ Every repo has its own label taxonomy, and an invented label is worse than none.
 
 ## 3. Ask or proceed?
 
-This decision feeds the classifier's `needs_clarification` judgment, and yours before it. Default to proceeding when the intent is clear; ask when building the wrong thing is a real risk.
+Triage returns `needs_clarification` and a `clarify` lane; this is how to weigh that judgment, and how to make it yourself when triage is unsure. Default to proceeding when the intent is clear; ask when building the wrong thing is a real risk.
 
 - Proceed with stated assumptions when the report is plausible and the gap is small: a missing version when the bug reproduces on the current one, a vague title over a clear body.
 - Ask when the report is plausible but not actionable: no steps, no expected-versus-actual behavior, contradictory details, or several incompatible readings of what's wanted. Apply the repo's needs-repro or needs-more-info style label if it has one.

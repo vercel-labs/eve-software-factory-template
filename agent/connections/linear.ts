@@ -15,7 +15,7 @@ import { isAutonomous } from "../lib/trust.js";
  * - The connection-wide approval predicate denies unattended factory runs, so
  *   a prompt-injected labeled issue cannot fan out into the tracker. Every
  *   attended session keeps the tools ungated: Linear writes are app-scoped
- *   and reversible, as before.
+ *   and reversible.
  */
 export default defineMcpClientConnection({
   approval: (ctx: ApprovalContext): ApprovalStatus =>

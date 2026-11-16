@@ -1,15 +1,22 @@
 import { defineWorkflowTool } from "eve/tools";
 import { z } from "zod";
+import { stationPolicy } from "../lib/github/approval.js";
+import { stationOutput } from "../lib/stations/result.js";
 import { IMPLEMENTER_OUTPUT_SCHEMA } from "../lib/stations/schemas.js";
 
 /**
  * Blocking wrapper the orchestrator calls to run the `implementer` station.
  *
  * @remarks
- * - `defineAgent` has no `outputSchema` anymore; `ctx.agent()` takes one per call.
- * - Named `run_implementer`, not `implementer`: the compiler rejects a tool and a local subagent with the same public name.
+ * Attaches the output schema per call, and throws when the station fails,
+ * is cancelled, or returns no data (`stationOutput` in
+ * `agent/lib/stations/result.ts`), so the orchestrator sees a tool error
+ * instead of an empty result. Named `run_implementer`, not `implementer`:
+ * the compiler rejects a tool and a local subagent with the same public
+ * name.
  */
 export default defineWorkflowTool({
+  approval: stationPolicy,
   description:
     "Execute an approved implementation plan in a checkout of the factory repository: " +
     "write the code on a feature branch, run the repository's own checks, commit, and " +
@@ -20,10 +27,11 @@ export default defineWorkflowTool({
     "findings.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("implementer", {
-      message,
+    const response = await ctx.agent("implementer").send(message, {
       outputSchema: IMPLEMENTER_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    return stationOutput("implementer", await response.result());
   },
   inputSchema: z.object({
     message: z

@@ -13,27 +13,26 @@ import {
  * The handoff-artifact tools.
  *
  * @remarks
- * A handoff artifact is a Markdown document one station produces and another reads, passed by id
- * so the text never travels through the orchestrator's context. Stations that produce long
- * documents hold the saver, stations that consume them hold the reader, and the orchestrator
- * holds only the reader, which is what keeps a relayed document out of the conversation.
+ * A handoff artifact (`config.ts` defines it) travels between stations by
+ * id. Stations that produce long documents hold the saver, stations that
+ * consume them hold the reader, and the orchestrator holds only the reader,
+ * which is what keeps a relayed document out of the conversation.
  *
- * Key layout, id format, and bounds live in `config.ts`; this module is the tool interface over
- * it. Both tools are inert by construction (validated ids, no overwrite, bounded size), so they
- * need no approval gate inside a station's own tool surface. Authorization resolves from the
- * ambient Vercel OIDC credentials.
+ * Key layout, id format, and bounds live in `config.ts`; this module is the
+ * tool interface over it. Both tools are inert by construction (validated
+ * ids, no overwrite, bounded size), so they need no approval gate inside a
+ * station's own tool surface. Authorization resolves from the ambient
+ * Vercel OIDC credentials.
  */
 
 /**
  * Build the tool that saves a handoff artifact.
  *
  * @remarks
- * Long output that another station needs, but nobody wants pasted through the orchestrator, goes
- * here instead of into the structured output. The caller returns the id and a short summary, the
- * orchestrator relays the id into the next station's message, and the receiving station reads
- * it. The document itself never passes through the orchestrator's context.
- *
- * @returns The `save_artifact` tool definition.
+ * Long output that another station needs, but nobody wants pasted through
+ * the orchestrator, goes here instead of into the structured output. The
+ * caller returns the id and a short summary, the orchestrator relays the id
+ * into the next station's message, and the receiving station reads it.
  */
 export const saveArtifactTool = () =>
   defineTool({
@@ -45,9 +44,9 @@ export const saveArtifactTool = () =>
       "what's in it, never the document itself: whoever needs the detail opens the id. Not for " +
       "a note that fits in a sentence.",
     /**
-     * Write the artifact to Blob under the reserved artifacts prefix.
+     * Write the artifact to Blob under the reserved artifacts prefix, never
+     * over an existing one.
      *
-     * @param input - Validated tool input.
      * @returns The `id` to hand along, or `saved: false` with an `error`.
      */
     async execute({ kind, title, markdown }) {
@@ -106,12 +105,11 @@ export const saveArtifactTool = () =>
  * Build the tool that reads a handoff artifact back.
  *
  * @remarks
- * Artifacts are read through the authenticated `get` path rather than by fetching a URL. An id
- * that fails validation and an id that was never saved both return `found: false`: the ids are
- * model-supplied, and the pattern check is what keeps one from addressing anything outside the
+ * Artifacts are read through the authenticated `get` path rather than by
+ * fetching a URL. An id that fails validation and an id that was never
+ * saved both return `found: false`: the ids are model-supplied, and the
+ * pattern check is what keeps one from addressing anything outside the
  * reserved prefix.
- *
- * @returns The `read_artifact` tool definition.
  */
 export const readArtifactTool = () =>
   defineTool({
@@ -122,8 +120,8 @@ export const readArtifactTool = () =>
     /**
      * Read the artifact from Blob.
      *
-     * @param input - Validated tool input.
-     * @returns `found: true` with the document, or `found: false`.
+     * @returns `found: true` with the document, or `found: false` for an
+     * invalid id, a missing artifact, or a failed read.
      */
     async execute({ id }) {
       const key = artifactKey(id);

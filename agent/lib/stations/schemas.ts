@@ -1,9 +1,14 @@
-// Structured-output JSON Schemas for the five stations, shared between each
-// station's agent.ts (which needs none of this, now that outputSchema lives
-// per-call) and its model-facing workflow-tool wrapper in agent/tools/,
-// which passes one of these to ctx.agent(name, { message, outputSchema }).
-// `as const` keeps the literal shape so the wrapper's return type is typed
-// from the schema instead of widening to plain JSON.
+// Structured-output JSON Schemas for the five stations. A station's agent.ts
+// declares no schema: its workflow-tool wrapper in agent/tools/ attaches one
+// of these per call, `ctx.agent(id).send(message, { outputSchema })`.
+//
+// Each station sets `tool: false`, so the orchestrator reaches it only
+// through that wrapper. The wrapper is named `run_<station>` because the
+// compiler rejects a tool and a local subagent with the same public name,
+// even with `tool: false`.
+//
+// `as const` keeps each schema's literal shape instead of widening it to
+// plain JSON.
 
 export const CLASSIFIER_OUTPUT_SCHEMA = {
   additionalProperties: false,
@@ -249,7 +254,7 @@ export const IMPLEMENTER_OUTPUT_SCHEMA = {
     },
     pushed: {
       description:
-        "Whether push_branch succeeded; when false, the failure reason is in known_limitations.",
+        "Whether the branch was pushed; when false, the failure reason is in known_limitations.",
       type: "boolean",
     },
     verification: {

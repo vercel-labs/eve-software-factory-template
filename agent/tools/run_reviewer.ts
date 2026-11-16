@@ -1,15 +1,22 @@
 import { defineWorkflowTool } from "eve/tools";
 import { z } from "zod";
+import { stationPolicy } from "../lib/github/approval.js";
+import { stationOutput } from "../lib/stations/result.js";
 import { REVIEWER_OUTPUT_SCHEMA } from "../lib/stations/schemas.js";
 
 /**
  * Blocking wrapper the orchestrator calls to run the `reviewer` station.
  *
  * @remarks
- * - `defineAgent` has no `outputSchema` anymore; `ctx.agent()` takes one per call.
- * - Named `run_reviewer`, not `reviewer`: the compiler rejects a tool and a local subagent with the same public name.
+ * Attaches the output schema per call, and throws when the station fails,
+ * is cancelled, or returns no data (`stationOutput` in
+ * `agent/lib/stations/result.ts`), so the orchestrator sees a tool error
+ * instead of an empty result. Named `run_reviewer`, not `reviewer`:
+ * the compiler rejects a tool and a local subagent with the same public
+ * name.
  */
 export default defineWorkflowTool({
+  approval: stationPolicy,
   description:
     "Independently review a pushed factory branch against the original work item and its " +
     "acceptance criteria: fetch the branch, read the real diff, re-run cheap checks, and " +
@@ -19,10 +26,11 @@ export default defineWorkflowTool({
     "the analyst saved its full detail as one.",
   async execute({ message }, ctx) {
     "use workflow";
-    return await ctx.agent("reviewer", {
-      message,
+    const response = await ctx.agent("reviewer").send(message, {
       outputSchema: REVIEWER_OUTPUT_SCHEMA,
+      signal: ctx.abortSignal,
     });
+    return stationOutput("reviewer", await response.result());
   },
   inputSchema: z.object({
     message: z

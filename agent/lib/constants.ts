@@ -1,17 +1,16 @@
 import { connect } from "@vercel/connect/eve";
 
 /**
- * Reads a required environment variable, throwing if it is unset so
- * misconfiguration fails fast instead of surfacing mid-request.
+ * Reads a required environment variable, so misconfiguration fails fast
+ * instead of surfacing mid-request.
  *
  * @remarks
  * Call it at module load when the value is needed for discovery (connector
  * UIDs, channel credentials), or inside a handler when a missing value
  * should not prevent the rest of the agent from loading.
  *
- * @param name - The environment variable name.
  * @param example - An example value, included in the error message.
- * @returns The environment variable's value.
+ * @throws When the variable is unset or empty.
  */
 export function requireEnv(name: string, example: string): string {
   const value = process.env[name];
@@ -29,14 +28,15 @@ export function requireEnv(name: string, example: string): string {
  * @remarks
  * Required at module load so a missing value fails discovery instead of
  * producing a factory with no target. Every surface reads this one constant:
- * the GitHub extension's default context, the station sandboxes' clone, and
- * the push URL.
+ * the repository `gh` is pinned to, the scope of every leased token, the
+ * station sandboxes' clone, and the push URL.
  */
 export const FACTORY_REPO = requireEnv("FACTORY_REPO", "acme/widgets");
 
 // GitHub's own naming rules: owner is alphanumeric with inner hyphens, repo
 // adds dots and underscores. Catching a malformed value here fails discovery
-// with a clear message instead of a cryptic clone error on a station's first session.
+// with a clear message instead of a cryptic clone error on a station's first
+// session.
 const FACTORY_REPO_PATTERN =
   /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/;
 
@@ -79,11 +79,10 @@ export const FACTORY_BRANCH_PREFIX =
   process.env.FACTORY_BRANCH_PREFIX ?? "factory/";
 
 /**
- * Shared Linear authorization via Vercel Connect.
- *
- * Single source of truth for the Linear connector so every consumer — the
- * Linear MCP connection and any tool calling the GraphQL API directly —
- * shares one Linear installation and one set of scopes.
+ * Shared Linear authorization via Vercel Connect: the single source of truth
+ * for the Linear connector, so the Linear MCP connection and any tool
+ * calling the GraphQL API directly share one Linear installation and one set
+ * of scopes.
  *
  * @remarks
  * - App-scoped (`principalType: "app"`), so no per-user consent flow is
@@ -93,11 +92,6 @@ export const FACTORY_BRANCH_PREFIX =
  * - The connector UID comes from the `LINEAR_CONNECTOR` environment variable
  *   (e.g. `linear/foreman-agent`); the module throws at load time if it
  *   is not set.
- *
- * @example
- * ```ts
- * const { token } = await ctx.getToken(linearAuth);
- * ```
  */
 export const linearAuth = connect({
   connector: requireEnv("LINEAR_CONNECTOR", "linear/foreman-agent"),

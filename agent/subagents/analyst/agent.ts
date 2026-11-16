@@ -11,10 +11,9 @@ import { MODELS } from "../../lib/models.js";
  * writes the implementation. The acceptance criteria it produces are the
  * contract the reviewer later judges the implementation against, verbatim.
  *
- * `tool: false` hides the station from the orchestrator; it calls it through
- * the `run_analyst` workflow tool, which attaches the output schema.
- * The wrapper cannot share this name: the compiler rejects a tool and a local
- * subagent with the same public name, even with `tool: false`.
+ * `tool: false` hides the station from the orchestrator, which runs it
+ * through the `run_analyst` workflow tool
+ * (`agent/lib/stations/schemas.ts` says why the two names differ).
  */
 export default defineAgent({
   description:
