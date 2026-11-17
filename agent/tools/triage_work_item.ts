@@ -2,22 +2,12 @@ import { decide } from "eve/ai";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { labelDecision } from "../lib/github/approval.js";
-import { parseGh } from "../lib/github/cli.js";
-import { runGh } from "../lib/github/lease.js";
 import {
   COMPLEXITIES,
   PRIORITIES,
-  TRIAGE_LIMITS,
-  triageWorkItem,
   WORK_ITEM_TYPES,
 } from "../lib/triage/decisions.js";
-import {
-  applyLabels,
-  fetchIssue,
-  fetchLabels,
-  findDuplicateCandidates,
-  type GhRunner,
-} from "../lib/triage/github.js";
+import { runTriage, sandboxGhRunner } from "../lib/triage/run.js";
 import { environment } from "../sandbox.js";
 
 const inputSchema = z.object({
@@ -69,69 +59,18 @@ export default defineTool({
       ? labelDecision(ctx.session.auth.current)
       : "not-applicable",
   description:
-    "Triage a work item in one fast step: type, priority, complexity, whether it is actionable or needs clarification or outside research, which existing repository labels fit, and whether it duplicates an existing issue. Pass issue_number for a GitHub issue (its labels are applied for you), or title and body for anything else. Returns a lane saying what to do next: pipeline, clarify, answer, or duplicate. Call this first for every work item.",
+    "Triage a work item in one fast step: type, priority, complexity, whether it is actionable or needs clarification or outside research, which existing repository labels fit, and whether it duplicates an existing issue. Pass issue_number for a GitHub issue (its labels are applied for you), or title and body for anything else. Returns a lane saying what to do next: pipeline, clarify, answer, or duplicate. Call this first for every work item, unless a triage result for it is already in your context.",
   async execute(input, ctx) {
     const sandbox = await ctx.getSandbox(environment);
-    const gh: GhRunner = (args) => {
-      const parsed = parseGh(args);
-      if (!parsed.ok) {
-        throw new Error(parsed.reason);
-      }
-      const { invocation } = parsed;
-      return runGh(
-        sandbox,
-        invocation,
-        invocation.effect.kind === "read" ? "repo-read" : "repo-triage"
-      );
-    };
-
-    const issue =
-      input.issue_number === undefined
-        ? null
-        : await fetchIssue(gh, input.issue_number);
-    const item = issue ?? {
-      body: input.body ?? "",
-      title: input.title ?? "",
-    };
-    if (item.title.trim() === "" && item.body.trim() === "") {
-      throw new Error("Pass issue_number, or a title and body to triage.");
-    }
-
-    const [vocabulary, candidates] = await Promise.all([
-      fetchLabels(gh),
-      findDuplicateCandidates(gh, item.title, issue?.number ?? null),
-    ]);
-    // `gh` splits --add-label on commas, so a label with a comma in its name
-    // can't be applied this way; leave it out rather than fail the triage.
-    const labels = vocabulary.filter((label) => !label.name.includes(","));
-    const triage = await triageWorkItem(item, labels, candidates, {
-      decide,
-      signal: ctx.abortSignal,
-    });
-
-    const applied =
-      issue !== null && input.apply_labels
-        ? await applyLabels(gh, issue, triage.labels)
-        : [];
-
-    return {
-      ...triage,
-      applied_labels: applied,
-      duplicate_candidates: candidates.filter((candidate) =>
-        triage.duplicates.includes(candidate.number)
-      ),
-      issue:
-        issue === null
-          ? null
-          : {
-              existing_labels: issue.labels,
-              number: issue.number,
-              state: issue.state,
-              title: issue.title,
-            },
-      labels_not_considered:
-        vocabulary.length - Math.min(labels.length, TRIAGE_LIMITS.labels),
-    };
+    return await runTriage(
+      {
+        applyLabels: input.apply_labels,
+        body: input.body,
+        issueNumber: input.issue_number,
+        title: input.title,
+      },
+      { decide, gh: sandboxGhRunner(sandbox), signal: ctx.abortSignal }
+    );
   },
   inputSchema,
   outputSchema: z.object({

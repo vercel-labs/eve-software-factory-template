@@ -455,7 +455,7 @@ describe("model assignments", () => {
   test("the orchestrator and decision ids are pinned as literal types", () => {
     expectTypeOf<
       (typeof MODELS)["orchestrator"]
-    >().toEqualTypeOf<"anthropic/claude-fable-5.2">();
+    >().toEqualTypeOf<"anthropic/claude-opus-5.5-fast">();
     expectTypeOf<
       (typeof MODELS)["decision"]
     >().toEqualTypeOf<"google/gemini-decision-1">();

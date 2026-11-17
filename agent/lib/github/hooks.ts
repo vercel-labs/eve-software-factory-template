@@ -8,7 +8,12 @@ import {
   type GitHubPullRequestEvent,
 } from "eve/channels/github";
 import { FACTORY_BRANCH_PREFIX, FACTORY_LABEL } from "../constants.js";
-import { stampAutonomous, stampSummary, stampTrusted } from "../trust.js";
+import {
+  stampAutonomous,
+  stampIssueIntake,
+  stampSummary,
+  stampTrusted,
+} from "../trust.js";
 import { mentionPattern, resolveBotName } from "./bot-name.js";
 
 /**
@@ -104,8 +109,8 @@ const isTrustedLabeler = async (
 
 /**
  * Task injected into an unattended intake session (an issue labeled with the
- * factory label). The issue's content is already in the session's context
- * when this runs.
+ * factory label). The session starts with the issue's number and title
+ * only; the orchestrator reads the rest itself.
  */
 export const FACTORY_INTAKE_TASK = [
   `This issue was handed to the factory with the "${FACTORY_LABEL}" label, and this run is unattended: nobody is watching to answer a question or approve an action, so never attempt an action that needs approval.`,
@@ -233,7 +238,7 @@ export const onIssue = async (
     return null;
   }
   return {
-    auth: stampAutonomous(defaultGitHubAuth(ctx), issue.issueNumber),
+    auth: stampIssueIntake(defaultGitHubAuth(ctx), issue.issueNumber),
     context: [FACTORY_INTAKE_TASK],
   };
 };

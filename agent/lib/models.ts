@@ -7,7 +7,7 @@ export const MODELS = {
   classifier: "openai/gpt-6.1-terra-fast",
   decision: "google/gemini-decision-1",
   implementer: "anthropic/claude-fable-5.2",
-  orchestrator: "anthropic/claude-fable-5.2",
+  orchestrator: "anthropic/claude-opus-5.5-fast",
   researcher: "anthropic/claude-opus-5.5",
   reviewer: "openai/gpt-6.1-sol-fast",
 } as const;

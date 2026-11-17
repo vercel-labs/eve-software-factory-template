@@ -4,8 +4,8 @@ import { MODELS } from "#lib/models.js";
 const vendorOf = (id: string): string => id.split("/")[0] ?? "";
 
 describe("MODELS", () => {
-  test("the orchestrator runs on anthropic/claude-fable-5.2", () => {
-    expect(MODELS.orchestrator).toBe("anthropic/claude-fable-5.2");
+  test("the orchestrator runs on anthropic/claude-opus-5.5-fast", () => {
+    expect(MODELS.orchestrator).toBe("anthropic/claude-opus-5.5-fast");
   });
 
   test("triage decisions run on google/gemini-decision-1", () => {
