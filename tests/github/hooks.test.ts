@@ -17,6 +17,7 @@ import {
   isAutonomous,
   isSummaryOnly,
   isTrusted,
+  workItemIssue,
 } from "#lib/trust.js";
 import { approvalContext, ghCommand, outcome } from "../helpers.js";
 
@@ -239,6 +240,8 @@ describe("onIssue: the factory label", () => {
       expect(result?.auth?.principalId).toBe(AUTONOMOUS_PRINCIPAL);
       expect(result?.auth?.principalType).toBe("service");
       expect(intakeIssueNumber(result?.auth ?? null)).toBe(12);
+      // The stamp that marks this run as one work item to triage up front.
+      expect(workItemIssue(result?.auth ?? null)).toBe(12);
       expect(isTrusted(result?.auth ?? null)).toBe(false);
       expect(requests).toEqual([
         "/repos/acme/widgets/collaborators/maintainer/permission",
@@ -393,6 +396,8 @@ describe("onCheckSuite: red CI on the factory's own pull requests", () => {
     expect(isTrusted(result?.auth ?? null)).toBe(false);
     expect(isSummaryOnly(result?.auth ?? null)).toBe(false);
     expect(intakeIssueNumber(result?.auth ?? null)).toBe(34);
+    // A red check is not a work item: nothing is triaged before this turn.
+    expect(workItemIssue(result?.auth ?? null)).toBeNull();
     expect(
       can(result?.auth, "pr", "comment", "34", "--body", "CI fix attempt 1")
     ).toBe("not-applicable");

@@ -29,7 +29,7 @@ describe("discovery", () => {
   });
 
   test("the main agent runs on Fable 5.2", () => {
-    expect(discovery.model).toBe("anthropic/claude-fable-5.2");
+    expect(discovery.model).toBe("anthropic/claude-opus-5.5-fast");
   });
 });
 

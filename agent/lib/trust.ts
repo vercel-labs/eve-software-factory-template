@@ -129,6 +129,59 @@ export function isSummaryOnly(auth: SessionAuthContext | null): boolean {
 }
 
 /**
+ * Auth attribute marking an unattended run as the intake of one GitHub
+ * issue: the run a maintainer started by labeling it.
+ *
+ * @remarks
+ * {@link INTAKE_ISSUE_ATTRIBUTE} alone does not say this. A CI-fix run and
+ * a summary run carry a thread number too, and neither is a work item to
+ * triage. Only `onIssue` sets this stamp.
+ */
+export const WORK_ITEM_ATTRIBUTE = "factoryWorkItem";
+
+/** The one value of {@link WORK_ITEM_ATTRIBUTE}. */
+export const ISSUE_WORK_ITEM = "issue";
+
+/**
+ * Stamps an unattended run as the intake of a GitHub issue.
+ *
+ * @param issue - The issue the factory label was applied to.
+ * @returns {@link stampAutonomous} for that issue, marked as a work item.
+ */
+export function stampIssueIntake(
+  auth: SessionAuthContext,
+  issue: number
+): SessionAuthContext {
+  const autonomous = stampAutonomous(auth, issue);
+  return {
+    ...autonomous,
+    attributes: {
+      ...autonomous.attributes,
+      [WORK_ITEM_ATTRIBUTE]: ISSUE_WORK_ITEM,
+    },
+  };
+}
+
+/**
+ * The issue an unattended run was started to work on.
+ *
+ * @returns Null unless the run carries the issue-intake stamp and a valid
+ * issue number, and is not a summary-only run.
+ */
+export function workItemIssue(auth: SessionAuthContext | null): number | null {
+  return auth?.attributes[WORK_ITEM_ATTRIBUTE] === ISSUE_WORK_ITEM &&
+    !isSummaryOnly(auth)
+    ? intakeIssueNumber(auth)
+    : null;
+}
+
+/** Whether the session is an unattended run for an intake API ticket. */
+export function isTicketRun(auth: SessionAuthContext | null): boolean {
+  const ticket = auth?.attributes[INTAKE_TICKET_ATTRIBUTE];
+  return isAutonomous(auth) && typeof ticket === "string" && ticket !== "";
+}
+
+/**
  * Auth attribute carrying the intake API ticket an unattended run was
  * dispatched for.
  */
