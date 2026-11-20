@@ -33,7 +33,7 @@ export const INSTALL_SCRIPT = [
   "  $SUDO apt-get update",
   "  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y gh",
   "fi",
-  "command -v pnpm >/dev/null 2>&1 || npm install -g pnpm || $SUDO npm install -g pnpm",
+  "command -v pnpm >/dev/null 2>&1 || npm install -g pnpm@12.21.0 || $SUDO npm install -g pnpm@12.21.0",
   `[ -x ${GH_BINARY} ] || { echo 'the GitHub CLI is missing at ${GH_BINARY}' >&2; exit 1; }`,
   `[ -x ${GIT_BINARY} ] || { echo 'git is missing at ${GIT_BINARY}' >&2; exit 1; }`,
   `$SUDO mkdir -p ${SHIM_DIRECTORY}`,
