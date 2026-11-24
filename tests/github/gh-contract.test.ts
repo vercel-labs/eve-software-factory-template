@@ -27,13 +27,16 @@ const required = process.env.FACTORY_REQUIRE_CLI_TESTS === "1";
 
 /**
  * How the CLI's help lists a flag: `--name type` for one that takes a value,
- * `--name` followed by the description for a switch. Returns null when the
- * flag has no line of its own.
+ * `--name` or `--name[=true|false]` followed by the description for a switch.
+ * Returns null when the flag has no line of its own.
  */
 const helpKind = (help: string, flag: string): "bool" | "value" | null => {
   const [, rest] =
     help.match(
-      new RegExp(`^\\s+(?:-\\w, )?--${flag}((?: {2,}| \\S|$).*)$`, "m")
+      new RegExp(
+        `^\\s+(?:-\\w, )?--${flag}(?:\\[=true\\|false\\])?((?: {2,}| \\S|$).*)$`,
+        "m"
+      )
     ) ?? [];
   if (rest === undefined) {
     return null;
