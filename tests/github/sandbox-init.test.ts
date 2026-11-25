@@ -485,7 +485,7 @@ describe("sandbox tooling", () => {
     const script = run?.kind === "run" ? run.command : "";
     expect(script.startsWith("set -e\n")).toBe(true);
     expect(script).toContain("apt-get install -y gh");
-    expect(script).toContain("npm install -g pnpm");
+    expect(script).toContain("npm install -g pnpm@12.21.0");
     expect(script).toContain("[ -x /usr/bin/gh ]");
     expect(script).toContain("[ -x /usr/bin/git ]");
     expect(steps).toHaveLength(1);
